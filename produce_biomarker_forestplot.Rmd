@@ -1,0 +1,262 @@
+---
+title: "generate biomarker figure"
+author: "Amy Anderson"
+date: "2024-04-19"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# load libraries
+library(tidyverse)
+library(ggplot2)
+library(plyr)
+
+
+
+# load model results from 'Tsimane cranial lesiona dn adult health.Rmd'
+load("./Models/pcls_hemoglobin.rda")
+load("./Models/pcls_wbc.rda")
+load("./Models/pcls_neutrophils.rda")
+load("./Models/pcls_eosinophils.rda")
+load("./Models/pcls_lymphocytes.rda")
+load("./Models/naturalkillers_mod.rda")
+load("./Models/bcells_mod.rda")
+load("./Models/total_cd4_mod.rda")
+load("./Models/naivecd4_mod.rda")
+load("./Models/total_cd8_mod.rda")
+load("./Models/naivecd8_mod.rda")
+load("./Models/cd4to8_mod.rda")
+
+
+## Read in data file.
+d <- read_csv("./Data/Processed_Data/post_biomarker_models.csv")
+
+```
+
+
+
+```{r}
+mods_list <- list(hb_history_mod, # list of model outputs
+                  wbc_mod,
+                  eosin_mod, 
+                  neutro_mod, 
+                  lympho_mod, 
+                  nk_mod, 
+                  b_mod,
+                  cd4,
+                  naivecd4, 
+                  cd8,
+                  naivecd8, 
+                  cd4to8)
+# extract population-level effects from each model. 
+mod_mains <- map(mods_list, fixef)
+
+
+
+
+
+# Function to write a table of model results
+get.table <- function(x){
+  addparentheses <- function(x){paste0("(",x,")")}
+  addpercent <- function(x){paste0(x,"%")}
+   test <- data.frame()
+  for(i in 1:length(x)){
+     co_estimate <- round(x[[i]][4,1], 2)
+     ph_estimate <- round(x[[i]][5,1], 2)
+     colower_ci <- round(x[[i]][4,3], 2)
+    coupper_ci <- round(x[[i]][4,4], 2)
+    phlower_ci <- round(x[[i]][5,3], 2)
+    phupper_ci <- round(x[[i]][5,4], 2)
+     coci <- addparentheses(paste(colower_ci, coupper_ci, sep = ", "))
+     phci <- addparentheses(paste(phlower_ci, phupper_ci, sep = ", "))
+     newrow <- data.frame(t((c(co_estimate, coci, ph_estimate, phci))))
+     test <- (rbind.fill(test, newrow))
+   }
+   return(test)
+}
+
+
+
+
+blood.table <- get.table(mod_mains)
+rownames(blood.table) <- c("hemoglobin", "WBC", "eosinophils", "neutrophils", "lymphocytes", "natural killer cells", "B cells", "total CD4 cells", "naive CD4 cells", "total CD8 cells", "naive CD8 cells", "CD4/CD8 ratio")
+
+colnames(blood.table) <- c("CO", "95% CI", "PH", "95% CI")
+
+write.csv(blood.table, file = "./Models/hematology_betas.csv")
+
+blood.table
+```
+
+
+```{r}
+#### Bespoke Functions for predicting posterior values ####
+# Produce posterior predicted values
+get.posterior <- function(x){
+  post <- as.data.frame(posterior_epred(x, newdata = nd, re_formula = NA))
+  names(post) <- c("lesions_absent", "orbital_porosity", "vault_porosity")
+  return(post)
+}
+# add columns for effect size (difference between baseline -- lesions absent -- and orbital/vault lesions present)
+add.deltas <- function(x){
+  x %>%
+    mutate(orbital_delta = orbital_porosity - lesions_absent,
+         vault_delta = vault_porosity - lesions_absent)
+}
+add.delta.percents <- function(x){
+  x %>%
+    mutate(orbital_delta_percent = (orbital_porosity - lesions_absent) / median(lesions_absent) * 100,
+    vault_delta_percent = (vault_porosity - lesions_absent) / median(lesions_absent) * 100) 
+}
+
+# new data for posterior predictions (included this as an object inside and not an argument of get.posterior() because all predicted values will use the same data frame -- this one -- for predictions)
+age <- rep(median(d$age), 3)
+sex <- rep("female", 3)
+co <- c(0,1,0)
+ph <- c(0,0,1)
+
+nd <- data.frame(age, sex, co, ph)
+```
+
+
+
+*Calculate distribution of posterior predicted mean values for hematological values, with/without lesions:*  
+Predicted mean values and 95% credibility interval for a female at the average sample age, given varying lesion status (no lesions, orbital porosity, cranial vault porosity). Deltas provide an intuitive way to interpret effect size, showing the difference between the distributions of predicted means for individuals with and without lesions. (e.g., the predicted mean B cell count for an average-aged woman in the sample is 30% (3.4-56%) lower if she has orbital roof porosity than if she has no porous cranial lesions). 
+```{r}
+
+mods_list <- list(hb_history_mod, # list of model outputs
+                  wbc_mod,
+                  eosin_mod, 
+                  neutro_mod, 
+                  lympho_mod, 
+                  nk_mod, 
+                  b_mod,
+                  cd4,
+                  naivecd4, 
+                  cd8,
+                  naivecd8, 
+                  cd4to8)
+
+resid_wbc <- sapply(list(d$leuco_log, # calculate median residual WBC count relevant for each model
+                  d$leuco_log, 
+                  d$wbc_sanseosin, 
+                  d$wbc_sansneutro, 
+                  d$wbc_sanslympho, 
+                  d$wbc_sansnk, 
+                  d$wbc_sansb, 
+                  d$wbc_sanscd4,
+                  d$wbc_sansnaivecd4, 
+                  d$wbc_sanscd8,
+                  d$wbc_sansnaivecd8, 
+                  d$wbc_sanscd48), median, na.rm = T)
+
+# calculate posterior predicted parameters for all hematology models
+## general form of function for calculating posterior mean estimates
+get.posterior <- function(x, nd){
+  post <- as.data.frame(posterior_epred(x, newdata = nd, re_formula = NA))
+  names(post) <- c("lesions_absent", "orbital_porosity", "vault_porosity")
+  return(post)
+}
+
+
+x = mods_list
+i = 1
+posterior_loop <- function(x){
+    post <- list() # create empty list object to populate
+  for(i in seq(x)){
+    nd1 <- data.frame(age = rep(median(d$age),3), sex = "female", co = c(0,1,0), ph = c(0,0,1)) # unchanging values for newdata predictions
+      nd <- data.frame(cbind(nd1, rep(resid_wbc[i], 3))) # changeable value (residual WBC) of newdata
+      resid_names <- c("leuco_log", 
+                       "leuco_log", 
+                       "wbc_sanseosin", 
+                       "wbc_sansneutro", 
+                       "wbc_sanslympho", 
+                       "wbc_sansnk", 
+                       "wbc_sansb", 
+                       "wbc_sanscd4",
+                       "wbc_sansnaivecd4", 
+                       "wbc_sanscd8",
+                       "wbc_sansnaivecd8", 
+                       "wbc_sanscd48")
+  names(nd)[5] <- resid_names[i] # rename the resid_wbc column of nd so it matches the model covariate
+  newpost <- get.posterior(x[[i]], nd) # calculate posterior mean estimates for model
+  post[[length(post) + 1]] <- newpost # new values from line above become item in list
+  }
+    assign("post", post, envir = globalenv()) # save the finished list in the global environment
+}
+
+# execute the function above:
+posterior_loop(mods_list[3]) # output is in the object 'post', a list with 10 data frames
+ 
+
+# exponentiate all posterior values except for hemoglobin (the only model not run on logged values)
+postreal <- post
+postreal[2:10] <- lapply(post[c(2:10)], exp)
+
+
+# calculate difference (delta) between posterior predicted means of outcomes with/without lesions 
+blood_post_deltas <- lapply(postreal, FUN = add.delta.percents)
+wbcpostdelta <- add.delta.percents(exp(get.posterior(wbc_mod)))
+blood_post_deltas[[11]] <- wbcpostdelta
+```
+
+
+
+
+Data for forest plot: mean delta and 95% CIs:
+```{r}
+library(HDInterval)
+library(plyr)
+library(purrr)
+posterior_means <- for(i in seq(blood_post_deltas){
+  
+},.depth = 1, .f = mean)
+
+# x = blood_post_deltas
+# i = 1
+delta.table <- function(x){
+  deltas <- data.frame()
+  variables <- c("hemoglobin", "total leukocytes", "eosinophils", "neutrophils", "lymphocytes", "natural killer cells", "B cells", "total CD4 cells", "naive CD4 cells", "total CD8 cells", "naive CD8 cells", "CD4/CD8 ratio")
+  for(i in seq(x)){
+  co_delta <- mean(x[[i]][,4])
+  co_lower <- as.numeric(paste(round(hdi(blood_post_deltas[[i]][,4])[1], 2)))
+  co_upper <- as.numeric(paste(round(hdi(blood_post_deltas[[i]][,4])[2], 2)))
+  ph_delta <- mean(x[[i]][,5])
+  ph_lower <- as.numeric(paste(round(hdi(blood_post_deltas[[i]][,5])[1], 2)))
+  ph_upper <- as.numeric(paste(round(hdi(blood_post_deltas[[i]][,5])[2], 2)))
+
+  newdelta1 <- data.frame(variables[i], co_delta, co_lower, co_upper, "orbit")
+  names(newdelta1) <- c("variable", "mean", "lower", "upper", "lesion")
+  newdelta2 <- data.frame(variables[i], ph_delta, ph_lower, ph_upper, "vault")
+  names(newdelta2) <- c("variable", "mean", "lower", "upper", "lesion")
+  deltas <- rbind.fill(deltas, newdelta1, newdelta2)
+  }
+  deltas
+}
+
+forestplot_data <- delta.table(blood_post_deltas)
+```
+
+
+Forest plot of hematological models: % difference in mean predicted values for a median-aged female compared to an age-and-sex-matched individual without cranial lesions:
+```{r}
+forestplot_data$variable <- factor(forestplot_data$variable, levels=rev(c("hemoglobin", "total leukocytes", "eosinophils", "neutrophils", "lymphocytes", "natural killer cells", "B cells", "total CD4 cells", "naive CD4 cells", "total CD8 cells", "naive CD8 cells", "CD4/CD8 ratio")))
+
+bloodforest <- ggplot(data=forestplot_data, aes(x=variable, y=mean, ymin=lower, ymax=upper)) +
+        geom_pointrange(aes(color = lesion), position = position_dodge(width = 0.5)) + 
+        scale_color_manual(values = c("tomato", "slateblue")) + 
+        geom_hline(yintercept=1, lty=2) +  # add a dotted line at x=1 after flip
+        coord_flip() +  # flip coordinates (puts labels on y axis)
+        xlab("") + ylab("predicted % difference with cranial lesions present (95% CI)") +
+        theme_bw() 
+
+save_plot(bloodforest, base_width = 4.5, filename = "./Figures/posterior_deltas_blood_forestplot.pdf")
+
+
+save_plot(raw_plots, base_width = 4.5, filename = "./Figures/Supplemental_Figures/S_raw_lesion_counts.pdf")
+bloodforest
+```
+
+

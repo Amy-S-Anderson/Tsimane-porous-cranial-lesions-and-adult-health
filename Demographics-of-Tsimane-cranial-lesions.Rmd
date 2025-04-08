@@ -1,0 +1,413 @@
+---
+title: "Demographics of Tsimane cranial lesions"
+author: "Amy Anderson"
+date: "2024-04-02"
+output: html_document
+---
+
+
+This script uses data from the Tsimane Health and Life History Project (<https://tsimane.anth.ucsb.edu/>) to examine: 
+
+ What individual factors -- age, sex -- predict the presence of porous lesions of the orbital roofs or cranial vault? 
+
+Porous cranial lesion status scored by Amy Anderson from bone-resolution head CTs (slice thickness 0.62 mm) with a pixel size of 0.4-0.49 mm (variation due to minor differences in the field of view for each scan). 
+
+```{r load libraries and data files, message = FALSE, warning = FALSE, echo = FALSE}
+# suppress warnings and messages in final knitted document
+
+## load libraries
+library(tidyverse)
+library(ggplot2)
+library(cowplot)
+library(brms)
+library(janitor)
+library(knitr) # for building pretty tables
+#library(kableExtra) # for even prettier tables
+
+
+
+## Read in data files.
+# contains data for Tsimane cranial lesions as scored by Amy Anderson in 2020.
+pcls <- read_csv('./Data/Processed_Data/Tsimane_cranial_lesions.csv')
+```
+
+
+
+First things first —— a Descriptive Table of lesion frequency by sex:  
+
+```{r}
+by_sex <- pcls %>%
+  group_by(sex) %>%
+  summarize(CO = sum(co, na.rm = T),
+            CO_perc = (round((CO / sum(!is.na(co)) * 100), 2)),
+            PH = sum(ph, na.rm = T),
+            PH_perc = (round((PH / sum(!is.na(ph)) * 100), 2))
+            )
+
+
+all <- pcls %>% 
+  summarize(sex = "all",
+            CO = sum(co, na.rm = T),
+            CO_perc = (round((CO / sum(!is.na(co)) * 100), 2)),
+            PH = sum(ph, na.rm = T),
+            PH_perc = (round((PH / sum(!is.na(ph)) * 100), 2))
+            )
+
+descriptive_table <- rbind(by_sex, all)
+
+addparentheses <- function(x){paste0("(",x,")")
+}
+age_sd <- round(c(sd(pcls[which(pcls$sex == "female"),]$ct_brain_age, na.rm = T), 
+                  sd(pcls[which(pcls$sex == "male"),]$ct_brain_age, na.rm = T),
+                  sd(pcls$ct_brain_age)),2)
+age_sd <- sapply(age_sd, addparentheses)
+
+age_mean <- round(c(mean(pcls[which(pcls$sex == "female"),]$ct_brain_age, na.rm = T), 
+                    mean(pcls[which(pcls$sex == "male"),]$ct_brain_age, na.rm = T),
+                    mean(pcls$ct_brain_age)),2)
+
+ages <- paste(age_mean, age_sd, sep = " ")
+
+
+descriptive_table <- cbind(descriptive_table, ages)
+names(descriptive_table) <- c("sex", "orbital porosity (n)", "orbital porosity (%)", "vault porosity (n)", "vault porosity (%)", "mean age (SD)")
+tmp <- t(descriptive_table) # is this table more easily read if rows/columns are switched?
+
+ write.csv(descriptive_table, file = './Tables/descriptive_table_lesion_demog.csv')
+  
+descriptive_table
+```
+
+
+
+
+### Predictors to test:  
+- age at time of head scan  
+   - *expect a negative non-linear relationship with age, greater for CO than PH. Non-linear because the processes that would cause lesion attrition (bone remodeling or elevated mortality risk) are multiplicative rather than additive processes*
+- self-reported sex  
+   - *no strong prediction in either direction. Results vary in previous studies from the archaeological literature*
+   
+   
+   
+   
+
+
+Some studies report an association between CO and PH. Some do not. What do we have here?
+
+```{r chi square for PH/CO co-occurrence}
+
+# Conditional probability of each lesion in the presence of the other:
+# p(C|H) = p(H|C) p(C) / p(H)
+# p(H|C) = p(C|H) p(H) / p(C)
+co_given_ph <- (5 / 23) * (23/373) / (41/373)
+# conditional probability of cribra, given PH = .12
+# overall probability of cribra = 0.06
+
+ph_given_co <- (5/46) * (46/373) / (23/373)
+# conditional probability of PH, given cribra = 0.22
+# overall probability of PH = 0.12
+
+chisq.test(table(pcls$ph, pcls$co), simulate.p.value = TRUE) # using simulation to estimate the p-value in the face of small cell values that otherwise render a chisq. test unreliable. 
+  
+```
+  Answer: Orbital lesions and vault lesions do not co-occur more often than expected by chance.  There are 8 individuals with both CO and PH.  
+  
+  
+  
+  
+#### Lesion Demography: Non-linear models for lesion presence ~ Age + Sex  
+
+  Look at brms options for smooths/splines. non-linear approaches that are more than just moving averages. 
+```{r PCLs ~ Age + Sex}
+
+# CO ~ gam for age, conditioning on sex
+
+## set a prior for the effect of age on CO, gaussian and centered at 0, but with a reasonably wide SD. 
+age_effect_prior <- prior(normal(0,5), class = b, coef = "age")
+
+
+# general additive model
+ co_age_at_scan <- brm(co ~ s(ct_brain_age),
+     data=pcls, family = bernoulli(),
+     prior = prior(normal(0,5), class = b),
+     iter = 4000, warmup = 1000,
+     chains=4, cores=4, control = list(adapt_delta = 0.98))
+ save(co_age_at_scan, file = "./Models/co_age_at_scan.rda")
+load("./Models/co_age_at_scan.rda")
+summary(co_age_at_scan)
+
+
+# gaussian process model
+co_demog_gaussian <- brm(co ~ gp(ct_brain_age, by = sex), data = pcls, family = bernoulli(),
+                         iter = 4000, warmup = 1000,
+                         chains=4, cores=4, control = list(adapt_delta = 0.95))
+co_gaussian <- brm(co ~ gp(ct_brain_age), data = pcls, family = bernoulli(),
+                         iter = 4000, warmup = 1000,
+                         chains=4, cores=4, control = list(adapt_delta = 0.95))
+
+
+# logistic regression
+co_demog_logit <- glm(co ~ ct_brain_age + sex, data = pcls, family = binomial(link = "logit"))
+summary(co_demog_logit)
+exp(co_demog_logit$coefficient[2:3])
+
+
+
+# polynomial (quadratic) regression
+pcls$ct_age_squared <- pcls$ct_brain_age * pcls$ct_brain_age
+co_demog_logit <- glm(co ~ ct_brain_age + ct_age_squared + sex + sex*ct_brain_age + sex*ct_age_squared, data = pcls, family = binomial(link = "logit"))
+summary(co_demog_logit)
+
+
+exp(confint(co_demog_logit))
+# Running with a nonlinear model instead of linear terms because none of the processes involved are expected to behavior linearly.
+
+# age has a consistently small but negative association with CO. 
+
+
+```
+
+```{r}
+# PH ~ general additive model for age, conditioning on sex
+
+
+ph_age_at_scan <- brm(ph ~ s(ct_brain_age),
+     data=pcls, family = bernoulli(),
+   #  prior = age_effect_prior,
+     iter = 5000, warmup = 1000,
+     chains=4, cores=4, control = list(adapt_delta = 0.99)) # still no effect of age or sex
+ save(ph_age_at_scan, file = "./Models/ph_age_at_scan.rda")
+
+
+
+# polynomial (quadratic) regression
+pcls$ct_age_squared <- pcls$ct_brain_age * pcls$ct_brain_age
+ph_demog_logit <- glm(ph ~ ct_brain_age + ct_age_squared + sex + sex*ct_brain_age + sex*ct_age_squared, data = pcls, family = binomial(link = "logit"))
+ph_demog_logit <- glm(ph ~ ct_brain_age + sex, data = pcls, family = binomial(link = "logit"))
+summary(ph_demog_logit)
+exp(ph_demog_logit$coefficient)
+
+table(pcls$sex, pcls$ph)
+
+# gaussian process model
+ph_demog_gaussian <- brm(ph ~ gp(ct_brain_age), data = pcls, family = bernoulli(),
+                         prior = age_effect_prior,
+                         iter = 4000, warmup = 1000,
+                         chains=4, cores=4, control = list(adapt_delta = 0.95))
+
+
+
+logistic <- function(x) exp(x) / (1 + exp(x))
+
+curve(logistic(coef(ph_demog_logit)[1] + coef(ph_demog_logit)[2]*x + coef(ph_demog_logit)[3]*x^2), from = 45, to = 85)
+curve(logistic(coef(ph_demog_logit)[1] + coef(ph_demog_logit)[2]*x + coef(ph_demog_logit)[3]*x^2 + coef(ph_demog_logit)[4]*x), from = 45, to = 85)
+
+load("./Models/ph_age_at_scan.rda")
+summary(ph_age_at_scan)
+```
+
+
+Do I want a table with OR's for a logistic regression predicting lesion presence ~ age + sex?
+
+```{r}
+ph_demog_logit <- glm(ph ~ ct_brain_age + sex, data = pcls, family = binomial(link = "logit"))
+summary(ph_demog_logit)
+# males are significantly more likely to have cranial vault porosity. 
+coef_OR <- round(exp(ph_demog_logit$coefficient),2)
+ci_OR <- paste(round(exp(confint(ph_demog_logit)[,1]),2), round(exp(confint(ph_demog_logit)[,2]),2), sep = ", ")
+ci_OR <- sapply(ci_OR, addparentheses)
+cbind(coef_OR, ci_OR)
+
+ph_OR <- cbind(coef_OR, ci_OR)
+
+coef_OR2 <- round(exp(co_demog_logit$coefficient),2)
+ci_OR2 <- paste(round(exp(confint(co_demog_logit)[,1]),2), round(exp(confint(co_demog_logit)[,2]),2), sep = ", ")
+ci_OR2 <- sapply(ci_OR2, addparentheses)
+co_OR <- cbind(coef_OR2, ci_OR2)
+
+logit_table <- cbind(co_OR, ph_OR)
+colnames(logit_table) <- c("Cranial vault Porosity", "95% CI", "Orbital roof porosity", "95% CI")
+rownames(logit_table) <- c("(Intercept)", "Age (years)", "Sex: Male")
+
+write.csv(logit_table, file = './Tables/pcl_demographics_logit_models.csv')
+
+```
+
+#### Figure 2 Panel A: Lesion Demography ####
+
+```{r Plot PCL demog models, warning = FALSE, message = FALSE}
+# chopping the youngest and oldest 5 years at either end of the age axis because the sample sizes are ridiculously small at the edges and the wide uncertainty on the plots at the edges of the age range distract from patterns in the range of the data where there is better coverage. This removes 7 individuals.
+co_plot <- conditional_effects(co_age_at_scan, effects = "ct_brain_age") # save the conditional effects
+co_effects.df<- as.data.frame(co_plot$`ct_brain_age`) %>% mutate(lesion = "Orbital porosity") %>% select(!co)# save the ce as a data frame and use it in ggplot
+ph_plot <- conditional_effects(ph_age_at_scan, effects = "ct_brain_age")
+ph_effects.df<- as.data.frame(ph_plot$`ct_brain_age`) %>% mutate(lesion = "Vault porosity") %>% select(!c(ph, sex))# save the ce as a data frame and use it in ggplot
+effects.df <- rbind(co_effects.df, ph_effects.df)
+plot_cols <- c("tomato3", "slateblue")
+
+
+demog_plot <- ggplot(effects.df, aes(x = ct_brain_age, y = estimate__)) +
+  geom_ribbon(aes(fill = lesion, ymin = lower__, ymax = upper__), alpha = 0.2) +
+  scale_fill_manual(values = plot_cols) +
+  geom_line(aes(color = lesion, linetype = lesion), colors = plot_cols, size = 1) +
+  scale_color_manual(values = plot_cols) +
+  theme_bw() +
+  scale_x_continuous(limits = c(45, 85), expand = c(0,0)) +
+  scale_y_continuous(limits = c(0, 0.75), expand = c(0,0)) +
+  xlab("Age (years)") +
+  ylab("probability\n of porous lesions") +
+ # ggtitle("orbital roofs") +
+  theme(legend.title = element_blank(), legend.position = "top",
+        legend.text = element_text(size = 10),
+        axis.title.y = element_text(size = 10)) #,
+        plot.title = element_text(hjust = 0.5, size = 12))
+
+
+
+save_plot(base_width = 3.25, base_height = 3.75, filename = "./Figures/Fig2_demog.pdf", demog_plot)
+
+demog_plot
+```
+
+  
+  *Fig. 2* Orbital roof lesions are negatively correlated with age for both sexes, while cranial vault porosity shows no clear association with age or sex.  
+  
+  
+  
+  
+  
+```{r}
+p1 <- ggplot(co_demog_logit, aes(x = ct_brain_age, y = co)) +
+  geom_smooth(method = "lm", color = "tomato3", fill = "tomato3") +
+  theme_bw() +
+    #scale_fill_manual(values = "tomato3") +
+   # scale_colour_manual(values = c("tomato3")) +
+ scale_x_continuous(limits = c(45, 85), expand = c(0,0)) +
+ # scale_y_continuous(limits = c(0, 0.65), expand = c(0,0)) +
+  xlab("Age (years)") +
+  ylab("probability of porous lesions") +
+  ggtitle("orbital roofs") +
+  theme(legend.title = element_blank(), legend.position = "bottom",
+        plot.title = element_text(hjust = 0.5, size = 12)) 
+p1
+```
+
+```{r}
+
+# need to make predicted points to plot this with ggplot. 
+p2 <- ggplot(ph_demog_logit, aes(x = ct_brain_age, y = ph)) +
+  geom_smooth(method = "lm", color = "slateblue", fill = "slateblue") +
+  theme_bw() +
+ # scale_x_continuous(expand = c(0,0)) +
+ # scale_fill_manual(values = "slateblue") +
+ # scale_colour_manual(values = "slateblue") +
+ scale_x_continuous(limits = c(45, 85), expand = c(0,0)) +
+ # scale_y_continuous(limits = c(0, 0.65), expand = c(0,0)) +
+  xlab("Age (years)") +
+  ylab("probability of porous lesions") +
+  ggtitle("cranial vault") +
+  theme(legend.title = element_blank(), legend.position = "bottom",
+        plot.title = element_text(hjust = 0.5, size = 12) ) 
+
+p2
+pcl_demog <- plot_grid(p1, p2)
+save_plot(base_width = 4.5, filename = "./Figures/Fig2_pcl_demog.pdf", pcl_demog)
+```
+  
+```{r}
+plot(conditional_effects(ph_age_at_scan, effects = "ct_brain_age"), plot = FALSE)[[1]] +
+  theme_bw() +
+  scale_x_continuous(expand = c(0,0)) +
+  scale_fill_manual(values = c("turquoise", "slateblue")) +
+  scale_colour_manual(values = c("turquoise", "slateblue")) +
+  scale_x_continuous(limits = c(45, 85), expand = c(0,0)) +
+  scale_y_continuous(limits = c(0, 0.65), expand = c(0,0)) +
+  xlab("Age (years)") +
+  ylab("probability of porous lesions") +
+  ggtitle("cranial vault") +
+  theme(legend.title = element_blank(), legend.position = "bottom",
+        plot.title = element_text(hjust = 0.5, size = 12) ) 
+```
+  
+  Recommended max height: 54 picas / 9” / 22.5 cm.
+Use one of the following widths:
+1 column wide (20.5 picas / 3.42” / 8.7 cm)
+1.5 columns wide (27 picas / 4.5” / 11.4 cm)
+2 columns wide (42.125 picas / 7” / 17.8 cm)
+  
+  
+  Supplemental Figure:  
+```{r S_Fig: histogram of lesions freq by age}
+
+pcls$lesion <- factor(pcls$lesion, levels = c("none", "ph", "both", "co"))
+
+count <- ggplot(pcls[which(!is.na(pcls$lesion)),], aes(x = round(ct_brain_age,0))) + 
+  geom_bar(aes(fill = lesion)) +
+  scale_fill_manual(values = c("goldenrod", "slateblue", "purple", "tomato")) +
+  theme_bw() +
+  xlab("age at head scan") +
+  labs(fill = "lesion status") +
+  theme(legend.position = "none")
+
+prop <- ggplot(pcls[which(!is.na(pcls$lesion)),], aes(x = round(ct_brain_age,0))) + 
+  geom_bar(aes(fill = lesion), position = "fill") +
+  scale_fill_manual(values = c("goldenrod", "slateblue", "purple", "tomato")) +
+  theme_bw() +
+  xlab("age at head scan") +
+  ylab("proportion") +
+  labs(fill = "lesion status") +
+  theme(legend.position = "bottom")
+
+
+raw_plots <- plot_grid(count, prop, ncol = 1)
+save_plot(raw_plots, base_width = 4.5, filename = "./Figures/Supplemental_Figures/S_raw_lesion_counts.pdf")
+raw_plots
+```
+  
+  
+  *Fig. S1.* Plot of lesion status across ages. Lesion status 'NA' indicates that either an orbit or a relevant area of the cranial vault was unobservable on the CT scan, so data on some aspect of the individual's lesion status is unavoidably missing. 
+  
+  
+```{r}
+deceased <- pcls %>%
+  filter(!is.na(date_of_death))
+
+table(deceased$sex)
+
+deceased <- deceased %>%
+  # change 'unknown' dates of death to a date of their latest clinic visit (med file), since final clinic visit dates are so close to the most recent date of death recorded from the demog file.
+  mutate(date_of_death = case_when(pid == "8BD7" ~ as.Date("2021-09-02"),
+                                   pid == "8JPP" ~ as.Date("2022-06-18"),
+                                   pid == "XL7R" ~ as.Date("2022-12-12"),
+                   TRUE ~ date_of_death))
+
+deceased$age <- as.numeric((deceased$date_of_death - deceased$date_of_birth) / 365.25)
+
+summary(deceased$age)
+
+library("survival") 
+library("survminer")
+
+pcls <- pcls %>%
+  mutate(age = if_else(!is.na(date_of_death), as.numeric((date_of_death - date_of_birth) / 365.25),
+                         as.numeric(as.Date("2022-07-01") - date_of_birth) / 365.25),
+         deceased = if_else(!is.na(date_of_death), 1, 0))
+
+pcl_mortality_hazard <- (coxph(Surv(age, deceased) ~ sex + co + ph, data = pcls))
+# check proportional hazards assumption
+cox.zph(pcl_mortality_hazard)
+summary(pcl_mortality_hazard)
+
+exp(coef(pcl_mortality_hazard))
+```
+   CO has a promising effect size as a predictor of mortality (3.39), but with only two cases of CO in the mortality sample, it's really too soon to say. Time will tell. 
+   
+   
+   
+```{r}
+# Supplemental figure: Age comparison of yes/no/ambiguous CO cases
+right <- ggplot(pcls_clean[which(!is.na(pcls_clean$co)),], aes(x = r_orbit_co, y = ct_brain_age)) + geom_jitter() + labs(x = "CO in left orbit", y = "age at scan") + theme_bw()
+left <- ggplot(pcls_clean[which(!is.na(pcls_clean$co)),], aes(x = l_orbit_co, y = ct_brain_age)) + geom_jitter() + labs(x = "CO in right orbit", y = "age at scan") + theme_bw()
+save_plot(plot_grid(right, left, ncol = 2), filename = "./Figures/CO_ambiguous_age_comparison.png")
+```
+
+  

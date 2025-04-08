@@ -1,0 +1,746 @@
+---
+title: "Tsimane cranial lesions & medical diagnoses"
+author: "Amy Anderson"
+date: "2024-04-02"
+output: html_document
+---
+### Clinical Diagnoses 
+
+This script uses data from the Tsimane Health and Life History Project (<https://tsimane.anth.ucsb.edu/>) to examine: 
+
+
+ What adult medical diagnoses are associated with having porosity of the orbital roofs or cranial vault? 
+
+  Diagnostic categories are:  
+- respiratory infections likely to be short-term and of infectious origin
+- tuberculosis, clinically diagnosed based on symptomatic presentation, occasionally with serological confirmation. 
+*Note* Analysis results have changed from an earlier version that is reported in Anderson's (2022) dissertation. Updating the medical data with more recent files added 11 new TB cases  (one a cleaned case from 2003, the rest diagnosed in 2020-2022), none with CO, one with PH. 
+
+
+Once Bret gives you the new medical visit/diagnosis files...
+*****for people diagnosed with resp infection. age at obs, year of diagnosis 
+
+year on x axis, age on y axis, plot colored plot with alpha value so overlapping values show. 
+
+```{r load libraries and data files, message = FALSE, warning = FALSE, echo = FALSE}
+# suppress warnings and messages in final knitted document
+
+## load libraries
+library(tidyverse)
+library(ggplot2)
+library(cowplot)
+library(brms)
+library(janitor)
+library(knitr) # for building pretty tables
+#library(kableExtra) # for even prettier tables
+
+# install.packages(c("survival", "survminer"))
+library("survival") # for hazard analysis (time-to-TB diagnosis)
+library("survminer")
+
+library("sjPlot")
+
+
+## Read in data files.
+# contains data for Tsimane cranial lesions as scored by Amy Anderson in 2020.
+pcls <- read_csv('./Data/Processed_Data/Tsimane_cranial_lesions.csv') %>%
+  select(-1)# remove superfluous indexing column
+
+med <- read_csv('./Data/Processed_Data/pcl_diagnoses.csv') # most up-to-date, clean file from Bret. Only has data on 372 of the 375 people with CT scans. 
+d <- left_join(med, pcls, by = "pid")
+d$co <- as.factor(d$co)
+d$ph <- as.factor(d$ph)
+
+```
+
+********* Medical file doesn't contain those last 4 unmatched PIDs that you just manually updated. Do you want to get Bret to re-pull the data?
+***Newest medical file is now missing 5 people rather than 4. Follow up on this (waiting for Bret's reply)
+
+
+First things first: How many years of clinical obs, and how many clinical obs., per person?
+```{r}
+
+tmp <- d %>%
+  group_by(pid) %>%
+  summarise(clinic_visits = length(unique(as.character(date))),
+            years_of_data = as.numeric((max(date) - min(date)) / 365.25))
+
+
+ggplot(tmp, aes(x = clinic_visits)) +
+  geom_bar()
+
+ggplot(tmp, aes(x = round(years_of_data))) +
+  geom_bar()
+
+ggplot(tmp, aes(x = clinic_visits, y = years_of_data)) + 
+  geom_point()
+```
+
+
+
+
+
+########################################################################################
+#### TB Hazard
+Do cranial lesions affect the hazard of developing symptomatic tuberculosis?
+Since TB is endemic in the population and diagnosed individuals are often treated and then reinfected, I will look at a hazard model for the youngest age of TB diagnosis (outcome) as a function of sex and lesion status
+
+Some cases have been serologically confirmed, but the majority are diagnosed based on symptomatic presentation. The vast majority of diagnoses are pulmonary TB. 1 case of miliary TB, and 1 case of TB -- other organs, are also listed.
+```{r}
+
+# code TB yes/no variable, per person per visit
+tbd <- d %>%
+  mutate(tb_diagnosis = case_when(icd10_category == "Tuberculosis" ~ 1,
+                        TRUE ~ 0)) %>%
+  select(pid, medical_id, date, date_of_birth, date_of_death, sex, ph, co, icd10_category, icd10_code, diagnosis, tb_diagnosis)
+tbd[grep("TUBERCULOSIS", tbd$diagnosis),]$tb_diagnosis <- 1
+
+# calculate age at observation.
+tbd$age <- as.numeric((tbd$date - tbd$date_of_birth) / 365.25)
+
+
+
+tbd <- tbd %>%
+  arrange(pid, date)
+# Remove observations after an individual's first TB+ clinic visit. These are irrelevant to the time-to-TB calculation. 
+tbd_filtered <- tbd %>%
+  arrange(pid, date) %>%
+  group_by(pid) %>%
+  filter(row_number() <= which.max(tb_diagnosis == 1)) %>%
+  ungroup() %>%
+  mutate(age = as.numeric(age))
+# tbd_filtered should now contain TB+/- assessments for each clinic visit up to and including an individual's first TB diagnosis. 
+
+```
+
+
+
+
+
+```{r}
+
+# % of individuals in the sample (n = 372) who were ever diagnosed with TB = 10.75% (40 people)
+sum(tbd_filtered$tb_diagnosis) / length(unique(tbd_filtered$pid)) * 100
+
+tmp <- tbd_filtered %>% filter(tb_diagnosis == 1) # 4 of those 40 people have CO (3 have PH). 
+length(unique(tbd[which(sum(tbd$tb_diagnosis) > 0),]$pid))
+
+ggplot(tbd_filtered, aes(x = age, y = date)) +
+  geom_line(aes(group = pid)) +
+    geom_point(aes(color = as.factor(tb_diagnosis)), alpha = 0.8) 
+```
+
+
+Brief detour: The literature predicts that low CD4 count predicts vulnerability to TB, but also that chronic active TB depletes CD4 counts. Flow cytometry data come from 2011-2013. Clinical diagnoses span 2002-2020. Do lower CD4 counts predict high risk of TB?
+
+```{r}
+flow <- read_csv('./Data/Processed_Data/Tsimane_flow_cytometry.csv') %>%
+  select(-1)  # remove superfluous indexing column
+
+tmp <- tbd_filtered %>% select(pid, date_of_birth, date, tb_diagnosis) %>%
+  unique() %>%
+  filter(pid %in% tb_flow$pid)
+tb_flow <- flow %>% filter(pid %in% tmp$pid) 
+
+### What % of people with flow cyt. data were diagnosed with TB at some point?
+tmp <- tbd_filtered %>% 
+  filter(pid %in% tb_flow$pid) %>%
+  select(pid, tb_diagnosis, co, ph) %>%
+  group_by(pid) %>%
+  mutate(tb_ever = sum(tb_diagnosis) > 0) %>%
+  select(-tb_diagnosis) %>%
+  distinct()
+
+table(tmp$tb_ever)
+### 20 people of the 196 with flow cyt. data were diagnosed with TB at some point (10.20%)
+table(tmp$tb_ever, tmp$co) # 3 of those 20 with TB have orbital roof porosity, compared to 4 of the 176 TB-never individuals. 
+table(tmp$tb_ever, tmp$ph)
+
+
+
+
+ggplot(tb_flow, aes(x = date_of_obs, y = pid)) +
+  geom_point() +
+  geom_line(aes(group = pid)) +
+  geom_point(data = tmp, aes(x = date, y = pid, color = as.factor(tb_diagnosis)))
+
+tmp2 <- tmp %>% select(pid, date)
+tmp3 <- tb_flow %>% select(pid, date_of_obs)
+tmp4 <- merge(tmp2, tmp3, by = "pid")
+tmp4$later <- tmp4$date - tmp4$date_of_obs > 0
+later <- tmp4 %>% filter(later == TRUE)
+length(unique(later$pid)) # ONLY 13 people have clinical diagnostic visits that fall on dates after their flow cytometry values. Therefore, we cannot really test whether low CD4 counts predict higher TB risk. Especially since 10 of the 13 were eventually diagnosed with TB. 
+
+```
+77% of people in the flow cytometry sample have flow cytometry data from two separate dates. All flow cytometry measures come from 2011-2013, while diagnostic data from medical clinic visits span 2002-2022. 
+Since only 13 people have clinical data from dates subsequent to their flow cytometry measures (and 10 of these were eventually diagnosed with TB), it's not really possible to test from this sample whether CD4 count predicts susceptibility to TB. 
+
+
+**Hazard Analysis:**. 
+ Assume that everyone is exposed at birth. The event of interest is clinical TB diagnosis (physicial observation of symptomatic TB). Age functions as the time-to-event variable.
+
+```{r}
+
+# change data frame to include a variable for age-at-diagnosis. 
+total_cases <- tbd_filtered %>% 
+  select(pid, tb_diagnosis, co, ph, sex, age) %>%
+  group_by(pid) %>%
+  mutate(age_at_final_obs = max(age),
+        tb_ever = sum(tb_diagnosis) > 0) %>%
+  select(-tb_diagnosis, - age) %>%
+  distinct()
+
+
+# Logistic Regression: Effect of Lesions on age-adjusted probability of TB diagnosis  
+tbco_glm <- brm(as.numeric(tb_ever) ~ age_at_final_obs + co, data = total_cases, family = bernoulli(link = "logit"))
+
+
+
+# tbco_glm <- glm(tb_ever ~ age_at_final_obs + co, data = total_cases)
+summary(tbco_glm)
+exp(confint(tbco_glm))
+tbco_glm_results <- cbind(round(exp(coef(tbco_glm)),3), round(exp(confint(tbco_glm)),3))
+save(tbco_glm, file = "./Models/TB_CO_glm.rda")
+
+tbph_glm <- brm(as.numeric(tb_ever) ~ age_at_final_obs + ph, data = total_cases, family = bernoulli(link = "logit"))
+# tbph_glm <- glm(tb_ever ~ age_at_final_obs + ph, data = total_cases)
+summary(tbph_glm)  
+tbph_glm_results <- cbind(round(exp(coef(tbph_glm)),3), round(exp(confint(tbph_glm)),3))
+save(tbph_glm, file = "./Models/TB_PH_glm.rda")
+
+# tb_glms_results <- rbind(tbco_glm_results, tbph_glm_results)
+# write.csv(tb_glms_results, file = "./Tables/TB_glm_ORs.csv")
+### Neither lesion shows a convincing association with age-adjusted risk of TB diagnosis  
+  
+
+
+# Contingency Table 
+# transform data for easily understandable contingency table names
+contingency_table_data <- total_cases %>%
+  select(-age_at_final_obs, -sex, -pid) %>%
+ mutate(tb_ever = if_else(tb_ever == TRUE, "TB+", "TB-"),
+         co = if_else(co == 1, "CO+", "CO-"),
+         ph = if_else(ph == 1, "PH+", "PH-")) 
+
+co_table <- table(contingency_table_data$co, contingency_table_data$tb_ever) # 4/39 TB cases have CO, compared to 19/332 TB- cases with CO.
+ph_table <- table(contingency_table_data$ph, contingency_table_data$tb_ever)
+contingency_table_tb <- rbind(co_table, ph_table)
+write.csv(contingency_table_tb, file = "./Tables/TB_lesions_contingency_table.csv")
+
+
+
+# table as %'s (of individuals in each lesion category with/without a TB diagnosis)
+round((prop.table(contingency_table_tb, 1) * 100), 3)
+```
+
+
+Playing around with age-at-diagnosis as a time-to-event variable. 
+Assumes that everyone is exposed to TB at birth, and the predictor of symptomatic expression at any observed age is immune function.
+Assumes that whatever causes lesions in childhood also impacts immune function at subsequent ages.
+```{r}
+########## Age = time-to-TB
+# tbh, I don't think there's sufficient power in the sample to justify this hazard model. Plus, CO is not observed in the older portion of the sample,
+# but TB is... so CO is likely to be associated with a younger age at TB diagnosis. This doesn't imply any kind of causal relationship. 
+
+# cox proportional hazard model: coxph(formula, data, method)
+## Assume all exposed at birth, model survival hazard from birth to symptomatic expression
+tbco_hazmod <- (coxph(Surv(age, tb_diagnosis) ~ co, data = tbd_filtered))
+summary(tbco_hazmod)
+tbph_hazmod <- (coxph(Surv(age, tb_diagnosis) ~ ph, data = tbd_filtered))
+summary(tbph_hazmod)
+
+# table of hazard model results with age as time-to-TB
+tbhaz <- round(coef(summary(tbco_hazmod))[,c(2,3,5)],3)
+names(tbhaz) <- c("hazard ratio", "SE", "p value")
+
+tbphhazardratio <- cbind(coef(summary(tbph_hazmod))[,2], confint(tbph_hazmod))
+tbcohazardratio <- cbind(coef(summary(tbco_hazmod))[,2], confint(tbco_hazmod))
+
+
+
+
+# check the distribution of overlapping traits -- are there people represented in every possible category ?
+tmp <- tbd_filtered %>%
+  mutate(co = if_else(co == 1, "co_yes", "co_no"),
+         ph = if_else(ph == 1, "ph_yes", "ph_no"),
+         tb_diagnosis = if_else(tb_diagnosis == 1, "TB_yes", "TB_no"))
+table(tmp$ph, tmp$tb_diagnosis)
+# barely.
+```
+
+.... So, CO is more likely in younger individuals, and is associated with a younger age at TB diagnosis.
+PH does not have a clear relationship with age, and is associated with an older age at TB diagnosis. It's unclear how to interpret these associations.
+I don't put much weight on them, given that logistic regressions don't show any association between lesion status and age-adjusted probability of TB diagnosis.
+
+
+
+
+hazard plot assuming infection at birth, age as time-to-event (TB diagnosis)
+```{r}
+nd <- with(tbd,
+            data.frame(co = c(0,1,0),
+                       ph = c(0,0,1),
+                       sex = c("male", "male", "male")))
+
+
+tb_co_haz <- ggsurvplot(survfit(tbco_hazmod, newdata = nd[-3,]), 
+                         data = tbd_filtered, 
+                         fun = "cumhaz",
+                         legend.labs = c("no lesions", "orbital porosity"),
+                         palette = c("goldenrod", "tomato"),
+                         xlim = c(35,85),
+                         ylim = c(0,2.5),
+                         conf.int.alpha = 0.3,
+                       conf.int.style = "ribbon",
+                         xlab = "Age (years)",
+                         ylab = "cumulative hazard of TB", 
+                         legend.title="",
+                        ggtheme = theme_survminer(base_size = 14,
+                                                  font.x = c(16, "plain", "black"),
+                                                  font.y = c(16, "plain", "black"),
+                                                  font.legend = c(14, "plain", "black")),
+                       axes.offset = FALSE) 
+tb_ph_haz <- ggsurvplot(survfit(tbph_hazmod, newdata = nd[-2,]), 
+                         data = tbd_filtered, 
+                         fun = "cumhaz",
+                         legend.labs = c("no lesions", "vault porosity"),
+                         palette = c("goldenrod", "slateblue"),
+                         xlim = c(35,85),
+                         ylim = c(0, 2.5),
+                         conf.int.alpha = 0.3,
+                       conf.int.style = "ribbon",
+                         xlab = "Age (years)",
+                         ylab = "cumulative hazard of TB", 
+                         legend.title="",
+                       ggtheme = theme_survminer(base_size = 14,
+                                                  font.x = c(16, "plain", "black"),
+                                                  font.y = c(16, "plain", "black"),
+                                                  font.legend = c(14, "plain", "black")),
+                       axes.offset = FALSE) 
+
+
+
+hazardplots <- list(tb_co_haz, tb_ph_haz)
+hazardplot_panel <- arrange_ggsurvplots(
+  hazardplots,
+  print = TRUE,
+  title = NA,
+  ncol = 2,
+)
+
+##### MULTIPANEL PLOT FOR TB HAZARD #####
+ggsave(hazardplot_panel, width = 8, height = 4, units = "in", dpi = 700, filename = "./Figures/TB_hazard_multipanel.pdf")
+```
+
+
+
+
+
+
+
+
+
+#### Respiratory Infections 
+```{r, eval = FALSE}
+
+clinic_visits <- d %>% 
+  select(pid, date) %>% 
+  group_by(pid, date) %>%
+  distinct() %>%
+  ungroup() %>%
+  group_by(pid) %>%
+  summarise(visits = n())
+sum(clinic_visits$visits) # 2,886 clinic visits.
+
+ggplot(clinic_visits, aes(x = visits)) + 
+  geom_histogram() +
+  geom_vline(xintercept = median(clinic_visits$visits)) # median n_visits = 7; range = 1-20. 
+
+# First: How common are respiratory infections?
+clinic_visits <- d %>%
+  mutate(resp = if_else(icd10_chapter == "Diseases Of The Respiratory System", 1, 0)) %>%
+  group_by(pid, date) %>%
+  summarise(resp_visit = if_else(sum(resp, na.rm = T) > 0, 1, 0))
+sum(clinic_visits$resp_visit) / nrow(clinic_visits) # 20% of visits have a respiratory diagnosis
+
+
+tmp <- d %>% filter(icd10_chapter == "Diseases Of The Respiratory System")
+table(tmp$icd10_category)
+# Chronic lower respiratory diseases = 106
+# Other acute lower respiratory infections = 87
+# Influenza and pneumonia = 75
+# 9.3% of visits should have a lower respiratory diagnosis
+
+# Acute upper respiratory infections = 370
+# 12.8 % of visits should have an upper respiratory diagnosis
+d$lower_respiratory <- if_else(d$icd10_category %in% c('Chronic lower respiratory diseases', 'Influenza and pneumonia', 'Other acute lower respiratory infections'), 1, 0) 
+d$upper_respiratory <- case_when(d$icd10_category == "Acute upper respiratory infections" ~ 1, 
+                                 d$diagnosis %in% c("J32", "J32.9", "J39.9") ~ 1, # chronic sinusitis, unspecified upper resp. tract infection. This excludes a few cases of nasal polyps and nasal turbinate hypertrophy, and one case of allergic rhinitis. 
+                                 TRUE ~ 0)
+
+# After some case-by-case exclusions based on non-infectious causes of specific diagnoses...
+tmp <- d %>% group_by(pid, date) %>%
+  summarise(low_resp_visit = if_else(sum(lower_respiratory, na.rm = T) > 0, 1,0))
+sum(tmp$low_resp_visit) / nrow(tmp) # 8.6% of visits have a lower respiratory infection diagnosis
+
+tmp <- d %>% group_by(pid, date) %>%
+  summarise(upper_resp_visit = if_else(sum(upper_respiratory, na.rm = T) > 0, 1,0))
+sum(tmp$upper_resp_visit) / nrow(tmp) # 11.5% of visits have an upper respiratory infection diagnosis. 
+
+```
+
+
+```{r Respiratory Models}
+# low-information priors are better than no-information priors. Set expectations for main effects as a wide normal distribution for each predictor (sd = 10) centered around 0. 
+bprior <- prior_string("normal(0,10)", class = "b")
+            
+
+
+
+
+d$obs_age <- as.numeric((d$date - d$date_of_birth) / 365.25)
+
+### Does CO predict different (higher) incidence of respiratory infections?
+# ...This model is really age-adjusted probability of infection, controlling for individual effects..
+
+
+#### Lower Respiratory Infection
+# Does CO status predict a difference in age-adjusted probability of resp infection? 
+lower_resp_co_mod <- brm(lower_respiratory ~ obs_age + co + (1|pid),
+      data = d,
+      prior = bprior,
+      family = bernoulli(),
+      iter = 2500, warmup = 500,
+     chains=4, cores=4,
+     control=list(adapt_delta = 0.95, max_treedepth = 15))
+
+save(lower_resp_co_mod, file = "./Models/lower_respiratory_co_mod.rda")
+
+# 23 of the 372 people with medical data and cranial lesion status have observable CO. 
+
+
+### Does PH predict different (higher) incidence of respiratory infections?
+lower_resp_ph_mod <- brm(lower_respiratory ~ obs_age + ph + (1|pid),
+      data = d,
+      prior = bprior,
+      family = bernoulli(),
+      iter = 2500, warmup = 500,
+     chains=4, cores=4,
+     control=list(adapt_delta = 0.95, max_treedepth = 15))
+
+exp(fixef(lower_resp_ph_mod))
+save(lower_resp_ph_mod, file = "./Models/lower_respiratory_ph_mod.rda")
+
+
+
+
+#### Upper Respiratory Infection
+
+
+
+### Does CO predict age-adjusted risk of UPPER respiratory infection? 
+upper_resp_co_mod <- brm(upper_respiratory ~ obs_age  + co + (1|pid),
+      data = d,
+      prior = bprior,
+      family = bernoulli(),
+      iter = 2500, warmup = 500,
+     chains=4, cores=4,
+     control=list(adapt_delta = 0.95, max_treedepth = 15))
+
+save(upper_resp_co_mod, file = "./Models/upper_respiratory_co_mod.rda")
+
+
+### Does PH predict age-adjusted risk of UPPER respiratory infection? 
+upper_resp_ph_mod <- brm(upper_respiratory ~ obs_age  + ph + (1|pid),
+      data = d,
+      prior = bprior,
+      family = bernoulli(),
+      iter = 2500, warmup = 500,
+     chains=4, cores=4,
+     control=list(adapt_delta = 0.95, max_treedepth = 15))
+
+save(upper_resp_ph_mod, file = "./Models/upper_respiratory_ph_mod.rda")
+```
+
+
+
+
+What diagnoses are grouped under 'lower' and 'upper' RTI?
+```{r}
+upper <- d %>%
+  filter(upper_respiratory == 1) # Pharyngitis,  acute nasopharyngitis (common cold),  tonsillitis, sinusitis
+
+
+lower <- d %>%
+  filter(lower_respiratory == 1) # pretty much just pneumonia and bronchitis
+```
+
+
+Make a table of frequency of diagnoses
+```{r}
+resp_freq_table 
+
+tmp <- d %>%
+  filter(upper_respiratory == 1) # 377 diagnoses of upper resp. 
+tmp2 <- d %>%
+  filter(lower_respiratory == 1) # 268 lower resp. diagnoses
+# Respiratory infections diagnosed at a combined 560 of 8,794 visits (6.36%)
+
+test <- d %>%
+  group_by(pid) %>%
+  mutate(lower_resp_freq = sum(lower_respiratory) / n(),
+         upper_resp_freq = sum(upper_respiratory) / n(),
+         visits = n()) %>%
+  ungroup() %>%
+  select(pid, upper_resp_freq, lower_resp_freq, visits, co, ph) %>%
+  distinct()
+
+ggplot(test, aes(x = upper_resp_freq, y = visits)) +
+  geom_point()
+ggplot(test, aes(x = upper_resp_freq)) +
+  geom_density(aes(fill = as.factor(ph)) , alpha = 0.5)
+  geom_density(aes(x = lower_resp_freq), fill = "pink", alpha = 0.5)
+  
+ggplot(d, aes(x = date, y = pid)) + geom_point(aes(color = as.factor(upper_respiratory)))
+ggplot(d, aes(x = obs_age, y = pid)) + geom_point(aes(color = as.factor(upper_respiratory)))
+
+
+```
+
+####
+```{r Table of model results}
+load('./Models/upper_resp_ph_mod')
+load('./Models/upper_resp_co_mod')
+load('./Models/lower_resp_ph_mod')
+load('./Models/lower_resp_co_mod')
+load("./Models/TB_CO_glm.rda")
+load("./Models/TB_PH_glm.rda")
+
+
+
+mod_results <- rbind(fixef(upper_resp_co_mod),
+              fixef(upper_resp_ph_mod),
+              fixef(lower_resp_co_mod),
+              fixef(lower_resp_ph_mod),
+              fixef(tbco_glm),
+              fixef(tbph_glm)
+)
+#tbph_glm_results <- cbind(round(exp(fixef(tbph_glm)),3), round(exp(confint(tbph_glm)),3))
+#tbco_glm_results <- cbind(round(exp(coef(tbco_glm)),3), round(exp(confint(tbco_glm)),3))
+
+  mod_results <- as.data.frame(mod_results) %>%
+  select(-2) %>%
+  exp() %>%
+  round(3) 
+predictor <- c("intercept", "age", "orbital porosity", 
+                           "intercept", "age", "vault porosity",
+                           "intercept", "age", "orbital porosity", 
+                           "intercept", "age", "vault porosity",
+                           "intercept", "age", "orbital porosity", 
+                           "intercept", "age", "vault porosity")
+outcome <- c(rep("upper respiratory infection", 6), rep("lower respiratory infection", 6), rep("tuberculosis", 6))
+model_variables <- cbind(outcome, predictor)
+model_results <- cbind(model_variables, mod_results)
+rownames(model_results) <- NULL
+colnames(model_results) <- c("outcome", "predictor", "OR", "lower 95% CI", "upper 95% CI")
+
+write.csv(model_results, file = "./Tables/resp_probability_model_results.csv")
+
+```
+
+
+
+```{r}
+# take a look at the shape of the posterior distribution
+tbco_post <- posterior_samples(tbco_glm)
+tbph_post <- posterior_samples(tbph_glm)
+
+plot_grid(ggplot(tbco_post, aes(x = exp(b_co1))) + geom_density() + geom_vline(xintercept = 1, col = "red") + scale_x_continuous(limits = c(0,10)),
+ggplot(tbph_post, aes(x = exp(b_ph1))) + geom_density() + geom_vline(xintercept = 1, col = "red") + scale_x_continuous(limits = c(0,10)), ncol = 1, align = "h")
+
+
+```
+
+
+```{r}
+sum(exp(tbco_post$b_co1) > 1) / nrow(tbco_post) # 91% of posterior is above 1
+sum(exp(tbph_post$b_ph1) < 1) / nrow(tbph_post) # 88% of posterior is below 1
+```
+
+### Run this Chunk in order to re-make the multi-panel plot of model results (Figure 5). Code for multipanel figure is in 'Tsimane cranial lesions and adult health.Rmd'.
+```{r Main Fig: Respiratory Forest Plot}
+#### Forest Plot of Respiratory Model Results
+
+# load models for making results tables and plotting: 
+load("./Models/lower_respiratory_co_mod.rda")
+load("./Models/lower_respiratory_ph_mod.rda")
+load("./Models/upper_respiratory_co_mod.rda")
+load("./Models/upper_respiratory_ph_mod.rda")
+load("./Models/TB_CO_glm.rda")
+load("./Models/TB_PH_glm.rda")
+
+
+### Format respiratory infection model results for plotting
+
+tbco_OR <- round(c(exp(coef(tbco_glm)[3]), exp(confint(tbco_glm)[3,])), 3)
+tbph_OR <- round(c(exp(coef(tbph_glm)[3]), exp(confint(tbph_glm)[3,])), 3)
+
+plot_data <- cbind(variable = c("orbital porosity", "vault porosity", "orbital porosity", "vault porosity", "orbital porosity", "vault porosity"),
+mod_results[c(3,6,9,12,15,18),], infection = c("upper respiratory infection", "upper respiratory infection", "lower respiratory infection", "lower respiratory infection", "tuberculosis", "tuberculosis"))
+
+plot_data$infection <- factor(plot_data$infection, levels = c("upper respiratory infection", "lower respiratory infection", "tuberculosis"
+))
+names(plot_data) <- c("variable", "OR", "lower_95", "upper_95", "infection")
+
+plot_data$OR = as.numeric(plot_data$OR)
+plot_data$upper_95 = as.numeric(plot_data$upper_95)
+plot_data$lower_95 = as.numeric(plot_data$lower_95)
+
+
+# make plot
+resp_forestplot <- ggplot(plot_data, aes(x=infection, y=OR, ymin=lower_95, ymax=upper_95)) +
+  geom_pointrange(aes(color = variable, linetype = variable), position = position_dodge(width = 0.4)) + 
+  scale_color_manual(values = c("tomato", "slateblue")) +
+        geom_hline(yintercept=1, lty=2) +  # add a dotted line at x=1 after flip
+  scale_y_continuous(breaks = 0:8) +
+        coord_flip() +
+        theme_bw() + 
+  labs(y = "odds ratio", x = "", shape = "", legend = "") +
+  theme(legend.title=element_blank(), legend.position = "none") #+
+ # theme(text = element_text(size = 17.5),
+       # plot.margin = margin(t = 10,  # Top margin
+       #                      r = 20,  # Right margin
+       #                      b = 10,  # Bottom margin
+       #                      l = 10)) 
+
+save_plot(resp_forestplot, filename = "./Figures/respiratory_models_forestplot.png", base_width = 15)
+
+resp_forestplot
+
+# How to change the relative amount of space between different colors plotted in the same factor grouping? (I want them narrower)
+```
+
+
+
+
+
+```{r}
+
+
+
+upper <- as.data.frame(exp(fixef(upper_resp_mod)[-1,c(1,3,4)])) %>%
+  mutate(resp = "upper")
+variable = c("age", "sex:male", "orbital porosity", "vault porosity")
+upper <- cbind(variable, upper)
+lower <- as.data.frame(exp(fixef(lower_resp_mod)[-1,c(1,3,4)])) %>%
+  mutate(resp = "lower")
+lower <- cbind(variable, lower)
+
+
+# hazardratio <- as.data.frame(cbind(variable, tbhazardratio)) %>%
+#   mutate(resp = "tuberculosis")
+# names(hazardratio) <- names(upper)
+
+
+  
+  
+plot_data <- rbind(upper, lower)
+plot_data$variable <- factor(plot_data$variable, levels = c("age", "sex:male", "orbital porosity", "vault porosity"))
+
+
+colors <- rep(c("black", "black", "tomato", "slateblue"),2)
+
+# make plot
+resp_forestplot <- ggplot(plot_data, aes(x=infection, y=Estimate, ymin=Q2.5, ymax=Q97.5)) +
+  geom_pointrange(aes(color = variable), size = 1, position = position_dodge(width = 0.8)) + 
+  scale_color_manual(values = c("tomato", "slateblue")) +
+        geom_hline(yintercept=1, lty=2) +  # add a dotted line at x=1 after flip
+        coord_flip() +
+        theme_bw() +
+  labs(y = "odds ratio", x = "", shape = "", legend = "respiratory infections") +
+  theme(legend.title = element_text(" "), legend.position = "top") +
+  theme(text = element_text(size = 14),
+        plot.margin = margin(t = 10,  # Top margin
+                             r = 20,  # Right margin
+                             b = 10,  # Bottom margin
+                             l = 10)) 
+
+resp_forestplot
+
+library(cowplot)
+legend <- get_legend(resp_forestplot)
+resp_forestplot <- resp_forestplot +
+  theme(legend.position = "none")
+
+plot_grid(resp_forestplot, legend , nrow = 2)# rel_heights = c(1, 0.2))
+# save plot
+ggsave(resp_forestplot, width = 4, height = 4, units = "in", dpi = 700, filename = "./Figures/respiratory_infection_forestplot.pdf")
+ggsave(legend, filename = './Figures/legend_respiratory_infection_forest_plot.pdf')
+plot(legend)
+```
+
+
+```{r}
+
+
+tb_co_haz <- tb_co_haz +
+  theme(plot.margin = margin(0.2, 0.2, 0.2, 0.2, "cm"))
+
+tb_plots <- ggarrange(tb_co_haz$plot, tb_ph_haz$plot,
+          ncol = 2, nrow = 1) +
+  theme(plot.margin = margin(0.5,0.2, 0.5, 2.1, "cm")) 
+ggsave(tb_plots, filename = "./Figures/TB_hazard_plots.pdf", height = 6, width = 9, units = "in")
+
+
+ggsave(pcl_haz_plot$plot, filename = "./Figures/TB_hazard_single_plot.pdf", height = 4, width = 4, units ="in")
+
+test <- ggarrange(tb_plots, resp_forestplot, ncol = 1, nrow = 2, labels = "AUTO") +
+  theme(plot.margin = margin(0.5,0.5,0.5,0.5, "cm")) 
+
+ggsave(test, filename = "./Figures/Fig2_diagnosis_plots.pdf")
+
+
+
+
+
+
+p1 <- plot(conditional_effects(co_age_at_scan, effects = "ct_brain_age:sex"), plot = FALSE)[[1]] +
+  theme_bw() +
+    scale_fill_manual(values = c("9999FF", "tomato")) +
+    scale_colour_manual(values = c("tomato4", "tomato")) +
+  scale_x_continuous(limits = c(45, 85), expand = c(0,0)) +
+  scale_y_continuous(limits = c(0, 0.65), expand = c(0,0)) +
+  xlab("Age (years)") +
+  ylab("probability of porous lesions") +
+  ggtitle("orbital roofs") +
+  theme(legend.title = element_blank(), legend.position = "bottom",
+        plot.title = element_text(hjust = 0.5, size = 12),
+        plot.margin = margin(t = 20,  # Top margin
+                             r = 25,  # Right margin
+                             b = 40,  # Bottom margin
+                             l = 40)) # Left margin) 
+
+p2 <- plot(conditional_effects(ph_age_at_scan, effects = "ct_brain_age:sex"), plot = FALSE)[[1]] +
+  theme_bw() +
+  scale_x_continuous(expand = c(0,0)) +
+  scale_fill_manual(values = c("purple4", "9999FF")) +
+  scale_colour_manual(values = c("purple4", "slateblue2")) +
+  scale_x_continuous(limits = c(45, 85), expand = c(0,0)) +
+  scale_y_continuous(limits = c(0, 0.65), expand = c(0,0)) +
+  xlab("Age (years)") +
+  ylab("probability of porous lesions") +
+  ggtitle("cranial vault") +
+  theme(legend.title = element_blank(), legend.position = "bottom",
+        plot.title = element_text(hjust = 0.5, size = 12),
+        plot.margin = margin(t = 20,  # Top margin
+                             r = 25,  # Right margin
+                             b = 40,  # Bottom margin
+                             l = 40) ) 
+
+demogs <- ggarrange(p1, p2, ncol = 2)
+ggsave(ggarrange(p1, p2, ncol = 2), filename = "./Figures/demographics_contrast.pdf", width = 4, height = 3.5, units = "in")
+
+
+ggsave(ggarrange(demogs, pcl_haz_plot$plot, resp_forestplot, ncol = 1, labels = "AUTO"), filename = "./Figures/compound_fig_demog_resp.pdf", width = 6, height = 9, units = "in")
+```
+

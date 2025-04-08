@@ -1,0 +1,1004 @@
+---
+title: "Tsimane cranial lesions"
+author: "Amy Anderson"
+date: "2024-02-21"
+output: html_document
+---
+
+### Blood Biomarkers 
+
+
+This script uses data from the Tsimane Health and Life History Project (<https://tsimane.anth.ucsb.edu/>) to examine: 
+
+Whether the presence of porous cranial lesions is associated with adult differences hemoglobin or in population counts of white blood cell subsets.
+Hemoglobin (g/dL) and 5-part WBC differential were measured in the field using a HemoCue handheld hemacytometer. 
+Values for NK cells, B cells, and T cell subsets were measured using flow cytometry. 
+
+All models include age and sex as covariates.  
+All models for hematological measures include logged total WBC count. Where the outcome measure is itself a white blood cell subset, the WBC covariate is adjusted to exclude the cell subset being regressed.  
+
+
+Measures of White blood cells include:
+ - total leukocyte counts
+ - neutrophil count
+ - lymphocyte count
+ - granulocyte count
+ 
+ ... and from flow cytometry
+ - Natural Killer cells count
+ - B cell count
+ - CD4 T cells
+    - naive CD4
+    - senescent CD4
+    - total CD4
+ - CD8 T cells
+    - naive CD8
+    - senescent CD8
+    - total CD8
+- CD4:CD8 Ratio
+
+Porous cranial lesion status scored by Amy Anderson from bone-resolution head CTs (slice thickness 0.62 mm) with a pixel size of 0.4-0.49 mm (variation due to minor differences in the field of view for each scan). 
+
+```{r load libraries and data files, message = FALSE, warning = FALSE, echo = FALSE}
+# suppress warnings and messages in final knitted document
+
+## load libraries
+library(tidyverse)
+library(ggplot2)
+library(cowplot)
+library(brms)
+library(knitr) # for building pretty tables
+#library(kableExtra) # for even prettier tables
+
+
+
+## Read in data files.
+# contains data for Tsimane cranial lesions as scored by Amy Anderson in 2020.
+pcls <- read_csv('./Data/Processed_Data/Tsimane_cranial_lesions.csv') %>%
+  select(-1)# remove superfluous indexing column
+
+# hemoglobin and data from 5-part WBC count
+bio <- read.csv('./Data/Processed_Data/Tsimane_hemocue_biomarkers.csv') %>%
+  select(-1) %>% # remove superfluous indexing column
+  mutate(date_of_obs = as.Date(date_of_obs)) %>%
+  select(-age)
+
+# cell subtype counts from flow cytometry
+flow <- read_csv('./Data/Processed_Data/Tsimane_flow_cytometry.csv') %>%
+  select(-1) %>% # remove superfluous indexing column
+  select(-age)
+
+# pull together cranial lesion and biomarker data. Note that this now repeats values from pcls (n = 375) across all bio observations for each person. One person with a head scan lacks biomarker data, so 'd' contains data for 374 people. 
+d <- merge(pcls, bio, all.y = TRUE, by = c("pid", "sex", "date_of_birth", "date_of_death"))
+d <- full_join(d, flow, by = c("pid", "sex", "date_of_birth", "date_of_death", "date_of_obs")) 
+d$age <- as.numeric((d$date_of_obs - d$date_of_birth) / 365.25)
+d$co <- as.factor(d$co)
+d$ph <- as.factor(d$ph)
+
+```
+
+
+
+```{r, eval = F}
+# quick check: TB data and flow data. How much overlap? 
+# * Note *: For this chunk to run, you must have already run the Clinical-Diagnoses-Tsimane-cranial-lesions file, which contains the data on tuberculosis diagnoses. 
+tmp <- tbd_filtered %>% filter(pid %in% flow$pid & date %in% flow$date_of_obs)
+length(unique(tmp$pid)) # Everyone in the flow cyt. sample (n = 196) has medical data. 185 of them have flow cyt. data from the date of their medical visit, but no TB diagnoses were delivered on those days. 
+tmp <- d %>% filter(pid %in% flow$pid & date %in% flow$date_of_obs) # 185 people have flow cytometry data from the date of their medical visit (years 2011-2013).
+
+
+tmp <- d %>% filter(pid %in% flow$pid & date %in% flow$date_of_obs) %>%
+  mutate(tb_diagnosis = case_when(icd10_category == "Tuberculosis" ~ 1,
+                        TRUE ~ 0)) %>%
+  select(pid, medical_id, date, date_of_birth, date_of_death, sex, ph, co, icd10_category, icd10_code, diagnosis, tb_diagnosis)
+tmp[grep("TUBERCULOSIS", tmp$diagnosis),]$tb_diagnosis <- 1
+tmp$age <- as.numeric((tmp$date - tmp$date_of_birth) / 365.25)
+tmp <- tmp %>%
+  arrange(pid, date) %>%
+  group_by(pid) %>%
+  filter(row_number() <= which.max(tb_diagnosis == 1)) %>%
+  ungroup() %>%
+  mutate(age = as.numeric(age)) # NONE of the TB diagnoses were given on the day that blood was drawn for flow cytometry. For TB+ people with flow cytometry measures, roughly half of TB diagnoses were given in years prior to flow cytometry, and half were given after. 
+
+ggplot(tbd_filtered[which(tbd_filtered$tb_diagnosis == 1),], aes(x = date)) +
+  geom_bar()
+
+
+```
+
+
+
+
+
+
+Because one known cause of these lesions is severe childhood anemia, it is important to look at potential correlation between cranial lesions and hemoglobin, even if no correlation is expected in adults.
+Does Lesion status predict hemoglobin at the time of head scan? I wouldn't expect so, even if lesions are caused by childhood anemia. 
+```{r, eval = F}
+#### Hemoglobin ####
+
+tmp <- d %>%
+  select(pid, date_of_obs, hb_f) %>%
+  filter(!is.na(hb_f)) %>%
+  mutate(year = year(date_of_obs)) %>%
+  group_by(pid) %>%
+   mutate(hb_count = n()) %>%
+  summarise(mean_hb_gap = (max(year) - min(year)) / n(),
+            hb_range = (max(year) - min(year)))
+for(i in 1:length(tmp$pid)){
+  
+  for(j in )
+}
+
+# All models for hematological measures include logged total WBC count. Where the outcome measure is itself a white blood cell subset, the WBC covariate is adjusted to exclude the cell subset being regressed.
+d$leuco_log <- log(d$leucocitos_f + 1)
+
+# low-information priors are better than no-information priors. Set expectations for main effects as a wide normal distribution for each predictor (sd = 10) centered around 0. 
+bprior <- prior_string("normal(0,10)", class = "b")
+
+#### HEMOGLOBIN:
+# Do cranial lesions predict lower individual HEMOGLOBIN across repeat measures?
+## prediction: cranial lesions will not be associated with adult hemoglobin levels.
+ hb_history_mod <- brm(hb_f ~ age + sex + co + ph + leuco_log + (1|pid),
+                   data = d,
+                   prior = bprior,
+                   family = gaussian(),
+                   iter = 2500, warmup = 500,
+     chains=4, cores=4)
+save(hb_history_mod, file = "./Models/pcls_hemoglobin.rda")
+ 
+# Just in case hemoglobin is relatively steady as an aggregate, but people with lesions are more likely to dip into anemia of inflammation at some point...
+d$anemic <- case_when(d$hb_f < 13 & d$sex == "male" ~ 1,
+                      d$hb_f < 12 & d$sex == "female" ~ 1,
+                      TRUE ~ 0) # define the sex-specific threshold for hemoglobin that = anemia (WHO guidelines)
+anemic_mod <- brm(anemic ~ age + co + ph + (1|pid),
+                      data = d,
+                      prior = bprior,
+                     
+                      iter = 2500, warmup = 500,
+                      chains=4, cores=4)
+
+anemic <- round(fixef(anemic_mod), 2)
+write.csv(anemic[,c(1,3,4)], file = './Models/anemic_threshold.csv')
+
+
+#### ALL LEUKOCYTES #### 
+
+wbc_mod <- brm(leuco_log ~ age + sex + co + ph + (1|pid),
+                   data = d,
+                   prior = bprior,
+                   family = gaussian(),
+                   iter = 2500, warmup = 500,
+                   chains=4, cores=4)
+save(wbc_mod, file = "./Models/pcls_wbc.rda")
+
+
+
+
+#### EOSINOPHILS ####
+
+d$eosin_log <- log(d$eosinophils_f + 1)
+d$wbc_sanseosin <- log(d$leucocitos_f - d$eosinophils_f)
+eosin_mod <- brm(eosin_log ~ age + sex + co + ph + wbc_sanseosin + (1|pid),
+                   data = d,
+                   prior = bprior,
+                   family = gaussian(),
+                   iter = 2500, warmup = 500,
+                   chains=4, cores=4)
+save(eosin_mod, file = "./Models/pcls_eosinophils.rda")
+## don't forget to exponentiate predicted values from this model.
+
+
+
+
+#### NEUTROPHILS ####
+
+d$neutro_log <- log(d$neutrophils_f + 1)
+d$wbc_sansneutro <- log(d$leucocitos_f - d$neutrophils_f)
+neutro_mod <- brm(neutro_log ~ age + sex + co + ph + wbc_sansneutro + (1|pid),
+                   data = d,
+                   prior = bprior,
+                   family = gaussian(),
+                   iter = 2500, warmup = 500,
+                  chains=4, cores=4)
+save(neutro_mod, file = "./Models/pcls_neutrophils.rda")
+### remember to exponentiate predicted values
+
+
+
+
+#### LYMPHOCYTES ####
+
+d$lympho_log <- log(d$lymphocitos_f + 1)
+d$wbc_sanslympho <- log(d$leucocitos_f - d$lymphocitos_f)
+
+lympho_mod <- brm(lympho_log ~ age + sex + co + ph + wbc_sanslympho + (1|pid),
+                   data = d,
+                   prior = bprior,
+                   family = gaussian(),
+                   iter = 2500, warmup = 500,
+                   chains=4, cores=4)
+save(lympho_mod, file = "./Models/pcls_lymphocytes.rda")
+
+
+
+# # From the subset of individuals with *FLOW CYTOMETRY data*: # #
+
+#### NATURAL KILLER CELLS
+
+d$nk_log <- log(d$flow_cyto_nk_count + 1)
+d$wbc_sansnk <- log(d$leucocitos_f - d$flow_cyto_nk_count)
+nk_mod <- brm(nk_log ~ age + sex + co + ph + wbc_sansnk + (1|pid),
+                   data = d,
+                   prior = bprior,
+                   family = gaussian(),
+                   iter = 4000, warmup = 1000,
+                   chains=4, cores=4,
+              control = list(adapt_delta = 0.9))
+save(nk_mod, file = "./Models/naturalkillers_mod.rda")
+
+
+
+
+#### B CELLS ####
+
+d$b_log <- log(d$flow_cyto_b_count)
+d$wbc_sansb <- log(d$leucocitos_f - d$flow_cyto_b_count)
+b_mod <- brm(b_log ~ age + sex + co + ph + wbc_sansb + (1|pid),
+             data = d,
+             prior = bprior,
+             family = gaussian(),
+             iter = 5000, warmup = 1000, thin = 1,
+             chains = 4, cores = 4)
+save(b_mod, file = "./Models/bcells_mod.rda")
+
+
+ggplot(d, aes(x = b_log, y = cd4countlog)) +
+  geom_point(aes(color = as.factor(co)))
+
+
+
+
+#### TOTAL CD4 CELLS ####
+
+d$cd4countlog <- log(d$flow_cyto_cd4count + 1)
+d$wbc_sanscd4 <- log(d$leucocitos_f - d$flow_cyto_cd4count)
+cd4 <- brm(cd4countlog ~ age + sex + co + ph + wbc_sanscd4 + (1|pid),
+                   data = d,
+                   prior = bprior,
+                   family = gaussian(),
+                   iter = 5000, warmup = 1000,
+                   chains=4, cores=4,
+     control=list(adapt_delta = 0.99, max_treedepth = 15))
+save(cd4, file = "./Models/total_cd4_mod.rda")
+
+
+
+
+#### NAIVE CD4 CELLS ####
+
+ # naive CD4 count
+d$naive_cd4_log <- log(d$flow_cyto_naive_cd4count + 1)
+d$wbc_sansnaivecd4 <- log(d$leucocitos_f - d$flow_cyto_naive_cd4count)
+naivecd4 <- brm(naive_cd4_log ~ age + sex + co + ph + wbc_sansnaivecd4 + (1|pid),
+                   data = d,
+                   prior = bprior,
+                   family = gaussian(),
+                   iter = 4000, warmup = 1000,
+                   chains=4, cores=4,
+     control=list(adapt_delta = 0.99, max_treedepth = 15))
+save(naivecd4, file = "./Models/naivecd4_mod.rda")
+
+
+d$naivecd4_outliers <- if_else(d$flow_cyto_naive_cd4count < quantile(d$flow_cyto_naive_cd4count, probs = 0.025, na.rm = T) | d$flow_cyto_naive_cd4count > quantile(d$flow_cyto_naive_cd4count, probs = 0.975, na.rm = T), 1, 0) # Note that, while 2 individuals with CO and 2 individuals with PH are represented in the 7 people who fall into the low-CD4 outliers, no individuals with lesions are present among the 7 individuals who are high-CD4 outliers. 
+
+
+# naivecd4 <- brm(naive_cd4_log ~ age + sex + co + ph + wbc_sansnaivecd4 + (1|pid),
+#                    data = d[which(d$naivecd4_outliers == 1),],
+#                    prior = bprior,
+#                    family = gaussian(),
+#                    iter = 4000, warmup = 1000,
+#                    chains=4, cores=4,
+#      control=list(adapt_delta = 0.99, max_treedepth = 15))
+# 
+
+
+
+ 
+#### NON-NAIVE CD4 CELLS ####
+
+d$nonnaive_cd4_log <- log(d$flow_cyto_cd4count - d$flow_cyto_naive_cd4count + 1)
+d$wbc_sansnonnaivecd4 <- log(d$leucocitos_f - (d$flow_cyto_cd4count - d$flow_cyto_naive_cd4count))
+
+prior <- set_prior("normal(0,10)", class = "b")
+nonnaivecd4 <- brm(nonnaive_cd4_log ~ age + sex + co + ph + wbc_sansnonnaivecd4 + (1|pid),
+                   data = d,
+                   prior = prior,
+                   family = gaussian(),
+                   iter = 4000, warmup = 500,
+                   chains=4, cores=2,
+                   control=list(adapt_delta = 0.99, max_treedepth = 15))
+
+save(nonnaivecd4, file = "./Models/nonnaivecd4_mod.rda")
+
+
+
+
+#### TOTAL CD8 CELLS
+
+d$cd8countlog <- log(d$flow_cyto_cd8count + 1)
+d$wbc_sanscd8 <- log(d$leucocitos_f - d$flow_cyto_cd8count)
+cd8 <- brm(cd8countlog ~ age + sex + co + ph + wbc_sanscd8 + (1|pid),
+                   data = d,
+                   prior = bprior,
+                   family = gaussian(),
+                   iter = 5500, warmup = 1000,
+                   chains=4, cores=4,
+                   control=list(adapt_delta = 0.99, max_treedepth = 15))
+save(cd8, file = "./Models/total_cd8_mod.rda")
+
+
+
+
+#### NAIVE CD8 CELLS
+
+d$naive_cd8_log <- log(d$flow_cyto_naive_cd8count + 1)
+d$wbc_sansnaivecd8 <- log(d$leucocitos_f - d$flow_cyto_naive_cd8count)
+naivecd8 <- brm(naive_cd8_log ~ age + sex + co + ph + wbc_sansnaivecd8 + (1|pid),
+                   data = d,
+                   prior = bprior,
+                   family = gaussian(),
+                   iter = 4000, warmup = 1000,
+                   chains=4, cores=4,
+control=list(adapt_delta = 0.99, max_treedepth = 15))
+
+save(naivecd8, file = "./Models/naivecd8_mod.rda")
+
+
+
+
+#### NON-NAIVE CD8 CELLS
+
+prior <- set_prior("normal(0,10)", class = "b")
+d$nonnaive_cd8_log <- log(d$flow_cyto_cd8count - d$flow_cyto_naive_cd8count + 1)
+d$wbc_sansnonnaivecd8 <- log(d$leucocitos_f - (d$flow_cyto_cd8count - d$flow_cyto_naive_cd8count))
+nonnaivecd8 <- brm(nonnaive_cd8_log ~ age + sex + co + ph + wbc_sansnonnaivecd8 + (1|pid),
+                   data = d,
+                   prior = prior,
+                   family = gaussian(),
+                   iter = 4000, warmup = 2000,
+                   init = 0,
+                   chains=4, cores=4,
+                   control=list(adapt_delta = 0.99, max_treedepth = 15))
+
+save(nonnaivecd8, file = "./Models/nonnaivecd8_mod.rda")
+
+
+
+
+#### CD4/CD8 RATIO ####
+
+d$wbc_sanscd48 <- log(d$leucocitos - (d$flow_cyto_cd8count + d$flow_cyto_cd4count))
+cd4to8 <- brm(log(flow_cyto_cd4count / flow_cyto_cd8count) ~ age + sex + co + ph + wbc_sanscd48 + (1|pid),
+              data = d,
+              prior = bprior,
+              family = gaussian(),
+              iter = 5000, warmup = 1000,
+              chains = 4, cores = 4,
+              control = list(adapt_delta = 0.99, max_treedepth = 15))
+save(cd4to8, file = "./Models/cd4to8_mod.rda")
+
+
+# re-running without the three most extreme outliers (cd4/cd8 ratio > 5) to see if the effect holds. 
+cd4to8 <- brm(log(flow_cyto_cd4count / flow_cyto_cd8count) ~ age + sex + co + ph + wbc_sanscd48 + (1|pid),
+              data = d[which(d$cd4_cd8_ratio < 5),],
+              prior = bprior,
+              family = gaussian(),
+              iter = 5000, warmup = 1000,
+              chains = 4, cores = 4,
+              control = list(adapt_delta = 0.99, max_treedepth = 15))
+# Doesn't move the needle at all. None of the most extreme cases have cranial lesions, or TB diagnoses. They all have CD4 counts close to the median. 
+# Their high ratios are due to low CD8 counts. 
+
+```
+
+
+### Run all models again, without controlling for current infection ###
+```{r}
+
+# low-information priors are better than no-information priors. Set expectations for main effects as a wide normal distribution for each predictor (sd = 10) centered around 0. 
+bprior <- prior_string("normal(0,10)", class = "b")
+
+ hb_history_mod2 <- brm(hb_f ~ age + sex + co + ph + (1|pid),
+                   data = d,
+                   prior = bprior,
+                   family = gaussian(),
+                   iter = 2500, warmup = 500,
+     chains=4, cores=4)
+save(hb_history_mod2, file = "./Models/pcls_hemoglobin2.rda")
+
+
+#### All Leukocytes model doesn't control for current infection, so use the existing saved model. 
+
+
+#### EOSINOPHILS ####
+
+d$eosin_log <- log(d$eosinophils_f + 1)
+eosin_mod2 <- brm(eosin_log ~ age + sex + co + ph + (1|pid),
+                   data = d,
+                   prior = bprior,
+                   family = gaussian(),
+                   iter = 2500, warmup = 500,
+                   chains=4, cores=4)
+save(eosin_mod2, file = "./Models/pcls_eosinophils2.rda")
+## don't forget to exponentiate predicted values from this model.
+
+
+
+
+#### NEUTROPHILS ####
+
+d$neutro_log <- log(d$neutrophils_f + 1)
+neutro_mod2 <- brm(neutro_log ~ age + sex + co + ph + (1|pid),
+                   data = d,
+                   prior = bprior,
+                   family = gaussian(),
+                   iter = 2500, warmup = 500,
+                  chains=4, cores=4)
+save(neutro_mod2, file = "./Models/pcls_neutrophils2.rda")
+### remember to exponentiate predicted values
+
+
+
+
+#### LYMPHOCYTES ####
+
+d$lympho_log <- log(d$lymphocitos_f + 1)
+
+lympho_mod2 <- brm(lympho_log ~ age + sex + co + ph + (1|pid),
+                   data = d,
+                   prior = bprior,
+                   family = gaussian(),
+                   iter = 2500, warmup = 500,
+                   chains=4, cores=4)
+save(lympho_mod2, file = "./Models/pcls_lymphocytes2.rda")
+
+
+
+# # From the subset of individuals with *FLOW CYTOMETRY data*: # #
+
+#### NATURAL KILLER CELLS
+
+d$nk_log <- log(d$flow_cyto_nk_count + 1)
+nk_mod2 <- brm(nk_log ~ age + sex + co + ph + (1|pid),
+                   data = d,
+                   prior = bprior,
+                   family = gaussian(),
+                   iter = 4000, warmup = 1000,
+                   chains=4, cores=4,
+              control = list(adapt_delta = 0.9))
+save(nk_mod2, file = "./Models/naturalkillers_mod2.rda")
+
+
+
+
+#### B CELLS ####
+
+d$b_log <- log(d$flow_cyto_b_count)
+b_mod2 <- brm(b_log ~ age + sex + co + ph + (1|pid),
+             data = d,
+             prior = bprior,
+             family = gaussian(),
+             iter = 5000, warmup = 1000, thin = 1, 
+            control=list(adapt_delta = 0.99, max_treedepth = 15),
+             chains = 4, cores = 4)
+save(b_mod2, file = "./Models/bcells_mod2.rda")
+
+
+
+#### TOTAL CD4 CELLS ####
+
+d$cd4countlog <- log(d$flow_cyto_cd4count + 1)
+cd42 <- brm(cd4countlog ~ age + sex + co + ph + (1|pid),
+                   data = d,
+                   prior = bprior,
+                   family = gaussian(),
+                   iter = 5000, warmup = 1000,
+                   chains=4, cores=4,
+     control=list(adapt_delta = 0.99, max_treedepth = 15))
+save(cd42, file = "./Models/total_cd4_mod2.rda")
+
+
+
+
+#### NAIVE CD4 CELLS ####
+
+ # naive CD4 count
+d$naive_cd4_log <- log(d$flow_cyto_naive_cd4count + 1)
+naivecd42 <- brm(naive_cd4_log ~ age + sex + co + ph + (1|pid),
+                   data = d,
+                   prior = bprior,
+                   family = gaussian(),
+                   iter = 4000, warmup = 1000,
+                   chains=4, cores=4,
+     control=list(adapt_delta = 0.99, max_treedepth = 15))
+save(naivecd42, file = "./Models/naivecd4_mod2.rda")
+
+ 
+#### NON-NAIVE CD4 CELLS ####
+
+d$nonnaive_cd4_log <- log(d$flow_cyto_cd4count - d$flow_cyto_naive_cd4count + 1)
+
+prior <- set_prior("normal(0,10)", class = "b")
+nonnaivecd42 <- brm(nonnaive_cd4_log ~ age + sex + co + ph + (1|pid),
+                   data = d,
+                   prior = prior,
+                   family = gaussian(),
+                   iter = 4000, warmup = 500,
+                   chains=4, cores=2,
+                   control=list(adapt_delta = 0.99, max_treedepth = 15))
+
+save(nonnaivecd42, file = "./Models/nonnaivecd4_mod2.rda")
+
+
+
+
+#### TOTAL CD8 CELLS
+
+d$cd8countlog <- log(d$flow_cyto_cd8count + 1)
+cd82 <- brm(cd8countlog ~ age + sex + co + ph + (1|pid),
+                   data = d,
+                   prior = bprior,
+                   family = gaussian(),
+                   iter = 5500, warmup = 1000,
+                   chains=4, cores=4,
+                   control=list(adapt_delta = 0.99, max_treedepth = 15))
+save(cd82, file = "./Models/total_cd8_mod2.rda")
+
+
+
+
+#### NAIVE CD8 CELLS
+
+d$naive_cd8_log <- log(d$flow_cyto_naive_cd8count + 1)
+d$wbc_sansnaivecd8 <- log(d$leucocitos_f - d$flow_cyto_naive_cd8count)
+naivecd82 <- brm(naive_cd8_log ~ age + sex + co + ph + (1|pid),
+                   data = d,
+                   prior = bprior,
+                   family = gaussian(),
+                   iter = 4000, warmup = 1000,
+                   chains=4, cores=4,
+control=list(adapt_delta = 0.99, max_treedepth = 15))
+
+save(naivecd82, file = "./Models/naivecd8_mod2.rda")
+
+
+
+
+#### NON-NAIVE CD8 CELLS
+
+prior <- set_prior("normal(0,10)", class = "b")
+d$nonnaive_cd8_log <- log(d$flow_cyto_cd8count - d$flow_cyto_naive_cd8count + 1)
+nonnaivecd82 <- brm(nonnaive_cd8_log ~ age + sex + co + ph + (1|pid),
+                   data = d,
+                   prior = prior,
+                   family = gaussian(),
+                   iter = 4000, warmup = 2000,
+                   init = 0,
+                   chains=4, cores=4,
+                   control=list(adapt_delta = 0.99, max_treedepth = 15))
+
+save(nonnaivecd82, file = "./Models/nonnaivecd8_mod2.rda")
+
+
+
+
+#### CD4/CD8 RATIO ####
+
+cd4to82 <- brm(log(flow_cyto_cd4count / flow_cyto_cd8count) ~ age + sex + co + ph + (1|pid),
+              data = d,
+              prior = bprior,
+              family = gaussian(),
+              iter = 5000, warmup = 1000,
+              chains = 4, cores = 4,
+              control = list(adapt_delta = 0.99, max_treedepth = 15))
+save(cd4to82, file = "./Models/cd4to8_mod2.rda")
+
+```
+```{r}
+ggplot(d, aes(x = age, y = cd4_cd8_ratio)) + geom_point(aes(color = as.factor(co))) + geom_smooth() + scale_y_continuous(limits = c(0,5.5)) + geom_line(aes(group = pid))
+
+ggplot(d, aes(x = age, y = flow_cyto_cd4count)) + geom_point(aes(color = as.factor(co))) + geom_smooth() + geom_line(aes(group = pid))
+
+ggplot(d, aes(x = age, y = flow_cyto_naive_cd4count)) + geom_point(aes(color = as.factor(co))) + geom_smooth() + geom_line(aes(group = pid))
+
+
+ggplot(d, aes(x = age, y = flow_cyto_cd8count)) + geom_point(aes(color = as.factor(co))) + geom_smooth() + geom_line(aes(group = pid))
+
+ggplot(d, aes(x = flow_cyto_cd8count, y = flow_cyto_cd4count)) + geom_point(aes(color = as.factor(co)))
+
+```
+
+
+
+```{r}
+
+#### Load all Models #### 
+
+load("./Models/pcls_hemoglobin.rda")
+load("./Models/pcls_wbc.rda") # <- this model doesn't control for current infection
+load("./Models/pcls_eosinophils.rda")
+load("./Models/pcls_neutrophils.rda")
+load("./Models/pcls_lymphocytes.rda")
+load("./Models/naturalkillers_mod.rda")
+load("./Models/bcells_mod.rda")
+load('./Models/total_cd4_mod.rda')
+load("./Models/naivecd4_mod.rda")
+load("./Models/nonnaivecd4_mod.rda")
+load('./Models/total_cd8_mod.rda')
+load("./Models/naivecd8_mod.rda")
+load("./Models/nonnaivecd8_mod.rda")
+load("./Models/cd4to8_mod.rda")
+
+# These models don't control for current infection
+load("./Models/pcls_hemoglobin2.rda")
+load("./Models/pcls_eosinophils2.rda") #
+load("./Models/pcls_neutrophils2.rda")
+load("./Models/pcls_lymphocytes2.rda")
+load("./Models/naturalkillers_mod2.rda")
+load("./Models/bcells_mod2.rda")
+load('./Models/total_cd4_mod2.rda')
+load("./Models/naivecd4_mod2.rda")
+load("./Models/nonnaivecd4_mod2.rda")
+load('./Models/total_cd8_mod2.rda')
+load("./Models/naivecd8_mod2.rda")
+load("./Models/nonnaivecd8_mod2.rda")
+load("./Models/cd4to8_mod2.rda")
+```
+
+#### Table of model estimates
+```{r}
+library(plyr)
+mods_list <- list(hb_history_mod, # list of model outputs
+                  wbc_mod,
+                  eosin_mod, 
+                  neutro_mod, 
+                  lympho_mod, 
+                  nk_mod, 
+                  b_mod,
+                  cd4,
+                  naivecd4, 
+                  nonnaivecd4,
+                  cd8,
+                  naivecd8, 
+                  nonnaivecd8,
+                  cd4to8)
+mod_mains <- map(mods_list, fixef)
+
+# list of models that do not adjust for current infection. 
+mods_list <- list(hb_history_mod2, # list of model outputs
+                  wbc_mod,
+                  eosin_mod2, 
+                  neutro_mod2, 
+                  lympho_mod2, 
+                  nk_mod2, 
+                  b_mod2,
+                  cd42,
+                  naivecd42, 
+                  nonnaivecd42,
+                  cd82,
+                  naivecd82, 
+                  nonnaivecd82,
+                  cd4to82)
+
+get.table <- function(x){
+  addparentheses <- function(x){paste0("(",x,")")}
+  addpercent <- function(x){paste0(x,"%")}
+   test <- data.frame()
+   # exponentiate betas for logged WBC counts
+  for(i in 1:length(x)){
+    if(i > 1 & i < 14){
+      co_estimate <- round(exp(x[[i]][4,1]), 2)
+      ph_estimate <- round(exp(x[[i]][5,1]), 2)
+      colower_ci <- round(exp(x[[i]][4,3]), 2)
+      coupper_ci <- round(exp(x[[i]][4,4]), 2)
+      phlower_ci <- round(exp(x[[i]][5,3]), 2)
+      phupper_ci <- round(exp(x[[i]][5,4]), 2)
+    }
+    else{
+     co_estimate <- round(x[[i]][4,1], 2)
+     ph_estimate <- round(x[[i]][5,1], 2)
+     colower_ci <- round(x[[i]][4,3], 2)
+     coupper_ci <- round(x[[i]][4,4], 2)
+     phlower_ci <- round(x[[i]][5,3], 2)
+     phupper_ci <- round(x[[i]][5,4], 2)
+  }
+     coci <- addparentheses(paste(colower_ci, coupper_ci, sep = ", "))
+     phci <- addparentheses(paste(phlower_ci, phupper_ci, sep = ", "))
+
+     newrow <- data.frame(t((c(co_estimate, coci, ph_estimate, phci))))
+     test <- (rbind.fill(test, newrow))
+  }
+   
+   return(test)
+}
+
+blood.table <- get.table(mod_mains)
+outcome_variables <- c("hemoglobin (g/dL)", "WBC", "eosinophils", "neutrophils", "lymphocytes", "natural killer cells", "B cells", "Total CD4 cells", "naive CD4 cells", "nonnaive CD4 cells", "Total CD8 cells", "naive CD8 cells", "nonnaive CD8 cells", "CD4/CD8 ratio")
+
+rownames(blood.table) <- outcome_variables
+colnames(blood.table) <- c("Predicted biomarker", "")
+blood.table
+# Most of these outcomes were logged - do I need to exponentiate the fixed effects to get the betas in biological units?
+write.csv(blood.table, file = "./Tables/hematology_betas.csv")
+
+
+write.csv(d, file = "./Data/Processed_Data/post_biomarker_models.csv")
+
+
+
+
+
+
+#### Write table of full model estimates
+get.table <- function(x){
+  addparentheses <- function(x){paste0("(",x,")")}
+  addpercent <- function(x){paste0(x,"%")}
+   test <- data.frame()
+   # exponentiate betas for logged WBC counts
+  for(i in 1:length(x)){
+    if(i > 1 & i < 14){
+      estimate <- round(exp(x[[i]][,1]), 2)
+      lower_ci <- round(exp(x[[i]][,3]), 2)
+      upper_ci <- round(exp(x[[i]][,4]), 2)
+      
+    }
+    else{
+      estimate <- round(x[[i]][,1], 2)
+      lower_ci <- round(x[[i]][,3], 2)
+      upper_ci <- round(x[[i]][,4], 2)
+  }
+     ci <- addparentheses(paste(lower_ci, upper_ci, sep = ", "))
+
+     model_estimates <- data.frame()
+     newrow <- for(j in 1:length(estimate)) {
+       new_entry <- data.frame(t((c(outcome = outcome_variables[i], variable = names(estimate[j]), estimate = estimate[[j]], CI = ci[j]))))
+       model_estimates <- rbind(model_estimates, new_entry)
+     }
+     test <- (plyr::rbind.fill(test, model_estimates))
+  }
+   
+   return(test)
+}
+
+write.csv(get.table(mod_mains), file = "./Tables/blood_models_covariates.csv")
+write.csv(get.table(mod_mains), file = "./Tables/blood_models_covariates2.csv") # without adjusting for current infection
+
+```
+
+
+
+
+```{r}
+
+addparentheses <- function(x){paste0("(",x,")")}
+
+# Difference in predicted mean value for a woman at median sample age with/without a lesion
+conditions <- data.frame(age = median(d$age), sex = "female")
+percent_difference <- data.frame()
+for(i in 1:length(mods_list)){
+  if(i > 1 & i < 14){ # for all WBC count models, exponentiate the estimates to get them back to cell counts rather than log-cells/uL
+    cond_eff <- conditional_effects(mods_list[[i]], conditions = conditions)
+  co_estimate <- exp(cond_eff$co$estimate__)
+  co_upper <- exp(cond_eff$co$upper__)
+  co_lower <- exp(cond_eff$co$lower__)
+  
+  mean_diff <- round((co_estimate[2] - co_estimate[1]) / co_estimate[1] * 100, 2)
+  lower_diff <- round((co_lower[2] - co_estimate[1]) / co_estimate[1] * 100, 2)
+  upper_diff <- round((co_upper[2] - co_estimate[1]) / co_estimate[1] * 100, 2)
+  
+  co_row <- data.frame(variable = outcome_variables[i], lesion = "orbital porosity", mean_diff = mean_diff, lower_95 = lower_diff, upper_95 = upper_diff)
+  
+  ph_estimate <- exp(cond_eff$ph$estimate__)
+  ph_lower <- exp(cond_eff$ph$lower__)
+  ph_upper <- exp(cond_eff$ph$upper__)
+
+  mean_diff <- round((ph_estimate[2] - ph_estimate[1]) / ph_estimate[1] * 100, 2)
+  lower_diff <- round((ph_lower[2] - ph_estimate[1]) / ph_estimate[1] * 100, 2)
+  upper_diff <- round((ph_upper[2] - ph_estimate[1]) / ph_estimate[1] * 100, 2)
+  
+  ph_row <- data.frame(variable = outcome_variables[i], lesion = "vault porosity", mean_diff = mean_diff, lower_95 = lower_diff, upper_95 = upper_diff)
+
+  new_rows <- rbind(co_row, ph_row)
+  }
+  else{
+    cond_eff <- conditional_effects(mods_list[[i]], conditions = conditions)
+  co_estimate <- cond_eff$co$estimate__
+  co_upper <- cond_eff$co$upper__
+  co_lower <- cond_eff$co$lower__
+  
+  mean_diff <- round((co_estimate[2] - co_estimate[1]) / co_estimate[1] * 100, 2)
+  lower_diff <- round((co_lower[2] - co_estimate[1]) / co_estimate[1] * 100, 2)
+  upper_diff <- round((co_upper[2] - co_estimate[1]) / co_estimate[1] * 100, 2)
+  
+  co_row <- data.frame(variable = outcome_variables[i], lesion = "orbital porosity", mean_diff = mean_diff, lower_95 = lower_diff, upper_95 = upper_diff)
+  
+  ph_estimate <- cond_eff$ph$estimate__
+  ph_lower <- cond_eff$ph$lower__
+  ph_upper <- cond_eff$ph$upper__
+
+  mean_diff <- round((ph_estimate[2] - ph_estimate[1]) / ph_estimate[1] * 100, 2)
+  lower_diff <- round((ph_lower[2] - ph_estimate[1]) / ph_estimate[1] * 100, 2)
+  upper_diff <- round((ph_upper[2] - ph_estimate[1]) / ph_estimate[1] * 100, 2)
+  
+  ph_row <- data.frame(variable = outcome_variables[i], lesion = "vault porosity", mean_diff = mean_diff, lower_95 = lower_diff, upper_95 = upper_diff)
+
+  new_rows <- rbind(co_row, ph_row)
+  }
+  
+  percent_difference <- rbind(percent_difference, new_rows)
+}
+
+percent_difference$CI <- addparentheses(paste(percent_difference$lower_95, percent_difference$upper_95, sep = ", ")) 
+percent_differences_table <- percent_difference %>%
+    select(-"lower_95", -"upper_95")
+names(percent_differences_table) <- c("outcome variable", "lesion", "predicted % difference with lesion", "95% CI")
+
+write.csv(percent_differences_table, file = "./Tables/percent_difference_predicted_blood_count.csv")
+write.csv(percent_differences_table, file = "./Tables/percent_difference_predicted_blood_count2.csv") # for models without adjustment for current infection
+
+
+
+
+
+
+
+
+```
+
+
+
+
+
+
+#### Forest Plot(s) of blood biomarker variables 
+```{r}
+
+
+percent_difference <- percent_difference %>%
+  filter(variable != "nonnaive CD8 cells",
+         variable != "nonnaive CD4 cells") %>%
+  mutate(variable = case_when(variable == "hemoglobin (g/dL)" ~ "hemoglobin",
+                              variable == "WBC" ~ "total leukocytes",
+                              variable == "Total CD4 cells" ~ "total CD4 T cells",
+                              variable == "naive CD4 cells" ~ "naive CD4 T cells",
+                              variable == "Total CD8 cells" ~ "total CD8 T cells",
+                              variable == "naive CD8 cells" ~ "naive CD8 T cells",
+                              TRUE ~ as.character(variable)))
+
+percent_difference$variable <- factor(percent_difference$variable, levels=rev(c("hemoglobin", "total leukocytes", "eosinophils", "neutrophils", "lymphocytes", "natural killer cells", "B cells", "total CD4 T cells", "naive CD4 T cells", "total CD8 T cells", "naive CD8 T cells", "CD4/CD8 ratio")))
+bloodforest1 <- ggplot(data = percent_difference[1:22,], aes(x=variable, y = mean_diff, ymin = lower_95, ymax = upper_95)) +
+        geom_pointrange(aes(color = lesion, linetype = lesion), position = position_dodge(width = 0.5)) + 
+        scale_color_manual(values = c("tomato", "slateblue")) + 
+        geom_hline(yintercept=1, lty=2) +  # add a dotted line at x=1 after flip
+        coord_flip() +  # flip coordinates (puts labels on y axis)
+        xlab("") + #ylab("predicted % difference with cranial lesions present (95% CI)") +
+        ylab("") +
+        theme(legend.position = "top") +
+        theme_bw() 
+
+bloodforest2 <- ggplot(data = percent_difference[23:24,], aes(x=variable, y = mean_diff, ymin = lower_95, ymax = upper_95)) +
+        geom_pointrange(aes(color = lesion, linetype = lesion), position = position_dodge(width = 0.5)) + 
+        scale_color_manual(values = c("tomato", "slateblue")) + 
+        geom_hline(yintercept=1, lty=2) +  # add a dotted line at x=1 after flip
+        coord_flip() +  # flip coordinates (puts labels on y axis)
+        xlab("") + ylab("predicted % difference with cranial lesions") +
+        theme_bw() +
+       theme(legend.position = "bottom", legend.title = element_blank()) 
+
+
+
+bloodforestplot <- cowplot::plot_grid(bloodforest1 + theme(legend.position = "none"), 
+                   bloodforest2, 
+                   ncol = 1, rel_heights = c(0.8, 0.25), align = "v", axis = "tblr")
+save_plot(bloodforestplot, filename = "./Figures/blood_biomarkers_forestplot_unadjusted.png")
+bloodforestplot
+
+
+```
+
+
+
+
+Make the multi-panel plot of results:
+(Note: Clinical-Diagnoses-Tsimane-cranial-lesions and Demographics of Tsimane cranial lesions files both need to have been run for this code to work. )
+```{r}
+save_plot(
+  cowplot::plot_grid(
+          resp_forestplot,
+          bloodforestplot,
+          ncol = 1,
+          labels = "AUTO", 
+          align = "hv") #,
+          axis = "b",
+          rel_heights = c(1,1,3)), file = "./Figures/multipanel_results_plot.png")
+
+demog_plot2 <- demog_plot +
+  theme(plot.margin = margin(t = 0.2, r = 0.2, b = 0.2, l = 3, unit = "cm"))
+bloodforestplot2 <- bloodforestplot +
+  theme(plot.margin = margin(t = 0, r = 0, b = 0, l = 1.1, unit = "cm"))
+
+ggsave(filename = "./Figures/Test.png", plot = ggarrange(plotlist = list(demog_plot2, resp_forestplot, bloodforestplot2), 
+          ncol = 1,
+          labels = "AUTO", 
+          axis = "l",
+       heights = c(1.75,1,2.75)),
+       height = 22, width = 11,  units = "cm")
+
+save_plot(file = "./Figures/multipanel_results_plot_unadjusted-for-current-infection.png", 
+          cowplot::plot_grid(demog_plot2, resp_forestplot, bloodforestplot2, ncol = 1, labels = "AUTO",
+                   rel_heights = c(1.25,0.6,2.8)),
+          base_height = 22, base_width = 11.5, units = "cm")
+```
+
+
+
+
+
+
+### Supplemental Figures
+
+```{r S_Fig: n_obs biomarkers}
+wbc_obs <- bio %>%
+  group_by(pid) %>%
+  filter(!is.na(neutrophils_f)) %>%
+  mutate(n_obs = n()) %>%
+  select(pid, n_obs) %>%
+  unique()
+
+
+flowcyt_obs <- flow %>%
+  group_by(pid) %>%
+  filter(!is.na(flow_cyto_cd4count)) %>%
+  mutate(n_obs = n()) %>%
+  select(pid, n_obs) %>%
+  unique()
+
+hb_obs <- bio %>%
+  group_by(pid) %>%
+  filter(!is.na(hb_f)) %>%
+  mutate(n_obs = n()) %>%
+  select(pid, n_obs) %>%
+  unique()
+
+p1 <- ggplot(wbc_obs, aes(x = n_obs)) +
+  geom_bar() +
+  scale_x_continuous(breaks = c(1,2,3,4,5,6,7,8,9,10,11,12)) +
+  xlab("") +
+  ggtitle("five-part leukocyte differentiation") +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+p2 <- ggplot(flowcyt_obs, aes(x = n_obs)) +
+  geom_bar() +
+  scale_x_continuous(breaks = c(1,2,3,4)) +
+  xlab(" ") +
+  ggtitle("flow cytometry ") +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+p3 <- ggplot(hb_obs, aes(x = n_obs)) +
+  geom_bar() +
+  scale_x_continuous(breaks = c(1,2,3,4,5,6,7,8,9,10,11,12,13)) +
+  xlab("observations per person") +
+  ggtitle("hemoglobin") +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+biomarker_obs <- cowplot::plot_grid(p2,p1,p3, ncol = 1, labels = "AUTO")
+save_plot(biomarker_obs, filename = "./Figures/Supplemental_Figures/biomarker_obs_per_person.png")
+biomarker_obs
+
+```
+
+*Fig. S2* 374 individuals with head scans also have data on white blood cell counts and hemoglobin. 174 individuals have flow cytometry data. Blood samples for flow cytometry were drawn during visits to the THLHP clinic in San Borja between late 2011 and 2014. Hemoglobin and five-part leukocyte differentials were conducted on-site during visits to the THLHP mobile medical team, with observations spanning 2002 to early 2020.  
+

@@ -1,0 +1,142 @@
+---
+title: "produce data timeline plot"
+author: "Amy Anderson"
+date: "2024-04-22"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+```
+
+
+
+```{r}
+## Read in data files.
+
+# contains data for Tsimane cranial lesions as scored by Amy Anderson in 2020.
+pcls <- read_csv('./Data/Processed_Data/Tsimane_cranial_lesions.csv') 
+pcls2 <- pcls %>%
+  mutate(data_type = "CT",
+         date_of_obs = ct_brain_date) %>%
+  select(pid, date_of_obs, data_type)
+
+ppl <- read_csv("./Data/people.csv") %>%
+  filter(pid %in% pcls$pid) %>%
+  select(pid, date_of_birth)
+
+# hemoglobin and data from 5-part WBC count
+bio <- read.csv('./Data/Processed_Data/Tsimane_hemocue_biomarkers.csv') %>%
+  mutate(date_of_obs = as.Date(date_of_obs),
+         data_type = "blood draw") %>%
+    select(pid, date_of_obs, data_type)
+
+
+# cell subtype counts from flow cytometry
+flow <- read_csv('./Data/Processed_Data/Tsimane_flow_cytometry.csv') %>%
+  mutate(data_type = "flow cytometry") %>%
+    select(pid, date_of_obs, data_type)
+
+# clinical diagnoses
+med <- read_csv('./Data/pcl_diagnoses.csv') %>%
+  mutate(date_of_obs = date,
+         data_type = "clinic visit") %>%
+  select(pid, date_of_obs, data_type)
+
+
+tmp <- rbind(pcls2, bio, flow, med)
+d <- left_join(tmp, ppl, by = "pid") %>%
+  mutate(age = as.numeric((date_of_obs - date_of_birth) / 365.25))
+d <- left_join(d, pcls[,c("pid", "ct_brain_age")], by = "pid")
+
+
+```
+
+
+
+```{r}
+# order data by age at brain scan for plotting
+tmp <- d %>%
+  mutate(pid = as.factor(pid),
+         pid = fct_reorder(pid, ct_brain_age)) %>%
+  select(pid, age, ct_brain_age, data_type) %>%
+  unique()
+
+tmp2 <- tmp %>%
+  select(pid, ct_brain_age)
+
+# apparently the only way to create a gradient alpha within a geom_rect object is to 'discretize' the rectangle into a bunch of skinny rectangles and set a sequential alpha for each.
+xmin = 0.5
+xmax = 12
+n = 100
+  x_steps <- seq(from = xmin, to = xmax, length.out = n + 1)
+  alpha_steps <- c(rep(0.4, n/2), seq(from = 0.4, to = 0.07, length.out = n/2))
+  rect_grad <- data.frame(xmin = x_steps[-(n + 1)], 
+                          xmax = x_steps[-1], 
+                          ymin = d[which(d$ct_brain_age == min(d$ct_brain_age, na.rm = T)),]$pid[1],
+                          ymax = d[which(d$ct_brain_age == max(d$ct_brain_age, na.rm = T)),]$pid[1], 
+                          alpha = alpha_steps)
+  # and for post-marrow potential of lesions
+  x_steps2 <- seq(from = 12, to = 30, length.out = n + 1)
+  alpha_steps <- c(rep(0.3, n/4),seq(0.3, 0, length.out = n/4*3))
+rect_grad2 <- data.frame(xmin = x_steps2[-(n + 1)], 
+                          xmax = x_steps2[-1], 
+                          ymin = d[which(d$ct_brain_age == min(d$ct_brain_age, na.rm = T)),]$pid[1],
+                          ymax = d[which(d$ct_brain_age == max(d$ct_brain_age, na.rm = T)),]$pid[1], 
+                          alpha = alpha_steps)
+```
+
+
+#### Build data timeline to visualize the mixed longitudinal data set. 
+```{r}
+
+colors <- c("red", "blue", "green", "darkorange", "green")
+data_timeline <- 
+ggplot(tmp[which(tmp$data_type %in% c("clinic visit", "blood draw")),], aes(x = age, y = pid)) +
+  geom_point(aes(color = data_type), alpha = 0.2, size = 1, width = 0.01) +
+  scale_color_manual(values = colors) +
+  geom_point(data = tmp2, aes(x = ct_brain_age, y = pid, color = "CT scan"),
+             size = 0.5,
+             pch=21,
+             alpha.fill = 0.1,
+             alpha.color = 0.3) +
+    # geom_rect(aes(xmin=0.5, xmax=12,
+    #               ymin = d[which(d$ct_brain_age == min(d$ct_brain_age)),]$pid[1],
+    #               ymax = d[which(d$ct_brain_age == max(d$ct_brain_age)),]$pid[1]),       alpha = 0.3, fill="red") +
+   geom_rect( aes(xmin=0.05, xmax=12,
+                   ymin = "A7WY",ymax = "YNKD", 
+                   alpha=0.01), color="rosybrown1", fill = "white") +
+  #  annotate(geom = "rect", xmin == 12, xmax == max(d$age),
+  ##           ymin == "A7WY",
+  #         ymax = "YNKD",
+  #         fill = "rosybrown1", alpha = 0.1) +
+    guides(alpha = "none") +
+  theme(axis.text.y = element_blank(),
+        axis.title.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.title = element_text(size = 10),
+        legend.position = "none") +
+  labs(x = "Age (years)") +
+  scale_x_continuous(limits = c(0,max(d$age)), expand = c(0,1), breaks = c(seq(0,100,10))) +
+  scale_y_discrete(expand = c(.01,.011)) +
+   # annotate(geom = "rect", xmin = 12, xmax = 90,
+   #          ymin = d[which(d$ct_brain_age == min(d$ct_brain_age)),]$pid[1],
+   #          ymax = d[which(d$ct_brain_age == max(d$ct_brain_age)),]$pid[1],
+   #          fill = "rosybrown1", alpha = 0.05) +
+  annotate(geom = "text", x = 6.25, y = d[which(d$ct_brain_age > quantile(d$ct_brain_age, 0.65, na.rm = T)),]$pid[1], label = "period of \n highest \n probability \n for developing  \n porous \ncranial lesions", size = 3.5) +
+  guides(colour = guide_legend(override.aes = list(size=1))) +
+  theme(legend.position = "bottom",
+        legend.key = element_blank(),
+        legend.title = element_blank(),
+        text = element_text(size = 18),
+        axis.title.x = element_text(size = 16)) +
+  guides(color = guide_legend(override.aes = list(size=4)))
+
+ggsave(data_timeline, filename = './Figures/data_timeline.png', width = 7, height = 4, units = "in")
+
+data_timeline
+
+```
+
